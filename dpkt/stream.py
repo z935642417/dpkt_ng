@@ -3,9 +3,11 @@
 from __future__ import print_function
 from __future__ import absolute_import
 
+import socket
 import struct
 
 from . import dpkt
+from . import ip as ip_mod
 from . import tcp as tcp_mod
 
 
@@ -197,6 +199,71 @@ class Connection(object):
         return bytes(result)
 
 
+class StreamReassembler(object):
+    """TCP stream reassembly engine."""
+    def __init__(self, max_connections=10000, max_buffer_per_dir=16*1024*1024,
+                 output_mode='separate', fill_gaps=False):
+        self.max_connections = max_connections
+        self.max_buffer_per_dir = max_buffer_per_dir
+        self.output_mode = output_mode
+        self.fill_gaps = fill_gaps
+        self.connections = {}
+        self._callbacks = []
+
+    def feed(self, ip, tcp_pkt):
+        conn_id = (socket.inet_ntoa(ip.src), tcp_pkt.sport,
+                   socket.inet_ntoa(ip.dst), tcp_pkt.dport)
+        if conn_id not in self.connections:
+            if len(self.connections) >= self.max_connections:
+                self._evict_one()
+            self.connections[conn_id] = Connection(
+                src_ip=conn_id[0], src_port=conn_id[1],
+                dst_ip=conn_id[2], dst_port=conn_id[3])
+        conn = self.connections[conn_id]
+        conn.feed(ip, tcp_pkt)
+        for buf in (conn.c2s, conn.s2c):
+            if buf.total_buffered > self.max_buffer_per_dir:
+                buf.get_data(fill_gaps=self.fill_gaps)
+        return conn
+
+    def _evict_one(self):
+        for cid, conn in list(self.connections.items()):
+            if conn.is_closed and not conn.c2s.contiguous and not conn.c2s.segments \
+               and not conn.s2c.contiguous and not conn.s2c.segments:
+                del self.connections[cid]
+                return
+        for cid, conn in list(self.connections.items()):
+            if conn.is_closed:
+                del self.connections[cid]
+                return
+        if self.connections:
+            worst = max(self.connections.items(),
+                       key=lambda x: x[1].c2s.total_buffered - len(x[1].c2s.contiguous)
+                                     + x[1].s2c.total_buffered - len(x[1].s2c.contiguous))
+            del self.connections[worst[0]]
+
+    def find(self, src=None, sport=None, dst=None, dport=None):
+        for cid, conn in self.connections.items():
+            if (src is None or cid[0] == src) and \
+               (sport is None or cid[1] == sport) and \
+               (dst is None or cid[2] == dst) and \
+               (dport is None or cid[3] == dport):
+                return conn
+        return None
+
+    def __getitem__(self, conn_id):
+        return self.connections[conn_id]
+
+    def __contains__(self, conn_id):
+        return conn_id in self.connections
+
+    def __iter__(self):
+        return iter(self.connections)
+
+    def __len__(self):
+        return len(self.connections)
+
+
 def test_direction_buffer_syn():
     """SYN sets ISN and advances next_seq by 1."""
     buf = DirectionBuffer()
@@ -324,3 +391,36 @@ def test_connection_properties():
     conn = Connection(src_ip='10.0.0.1', src_port=12345, dst_ip='10.0.0.2', dst_port=80)
     assert conn.conn_id == ('10.0.0.1', 12345, '10.0.0.2', 80)
     assert not conn.is_closed
+
+
+def test_stream_reassembler_feed():
+    reasm = StreamReassembler(max_connections=100, max_buffer_per_dir=1024*1024)
+    ip = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt = tcp_mod.TCP(sport=12345, dport=445, seq=100, flags=tcp_mod.TH_SYN, data=b'')
+    ip.data = tcp_pkt
+    reasm.feed(ip, tcp_pkt)
+    conn_id = ('10.0.0.1', 12345, '10.0.0.2', 445)
+    assert conn_id in reasm.connections
+    conn = reasm[conn_id]
+    assert conn.c2s.syn_received
+
+
+def test_stream_reassembler_eviction():
+    reasm = StreamReassembler(max_connections=3, max_buffer_per_dir=1024)
+    for i in range(5):
+        ip = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+        tcp_pkt = tcp_mod.TCP(sport=10000+i, dport=445, seq=100, flags=tcp_mod.TH_SYN, data=b'')
+        ip.data = tcp_pkt
+        reasm.feed(ip, tcp_pkt)
+    assert len(reasm.connections) == 3
+
+
+def test_stream_reassembler_find():
+    reasm = StreamReassembler()
+    ip = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt = tcp_mod.TCP(sport=12345, dport=445, seq=100, flags=tcp_mod.TH_SYN, data=b'')
+    ip.data = tcp_pkt
+    reasm.feed(ip, tcp_pkt)
+    conn = reasm.find(src='10.0.0.1', sport=12345, dst='10.0.0.2', dport=445)
+    assert conn is not None
+    assert reasm.find(src='10.0.0.1', sport=99999, dst='10.0.0.2', dport=445) is None
