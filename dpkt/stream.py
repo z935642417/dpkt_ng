@@ -147,3 +147,69 @@ def test_direction_buffer_out_of_order():
     buf.feed(seq=1, ack=0, payload=b'HEL', flags=tcp_mod.TH_ACK)
     assert buf.get_data() == b'HELLO'
     assert len(buf.segments) == 0
+
+
+def test_direction_buffer_overlap():
+    """Retransmitted/overlapping data is deduplicated."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    buf.feed(seq=1, ack=0, payload=b'HELLO', flags=tcp_mod.TH_ACK)
+    buf.feed(seq=1, ack=0, payload=b'HELLO', flags=tcp_mod.TH_ACK)  # full retransmit
+    assert buf.get_data() == b'HELLO'
+    assert buf.get_data() == b''  # nothing extra
+
+
+def test_direction_buffer_partial_overlap():
+    """Partially overlapping segment: new bytes after overlap are kept."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    buf.feed(seq=1, ack=0, payload=b'HELLO', flags=tcp_mod.TH_ACK)
+    buf.get_data()
+    # Retransmit with extra data appended
+    buf.feed(seq=3, ack=0, payload=b'LLOWORLD', flags=tcp_mod.TH_ACK)
+    assert buf.get_data() == b'WORLD'
+
+
+def test_direction_buffer_fin_complete():
+    """is_complete only when all bytes between SYN and FIN received."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    assert not buf.is_complete
+    buf.feed(seq=1, ack=0, payload=b'DATA', flags=tcp_mod.TH_ACK)
+    assert not buf.is_complete  # FIN not yet seen
+    buf.feed(seq=5, ack=0, payload=b'', flags=tcp_mod.TH_ACK | tcp_mod.TH_FIN)
+    assert buf.is_complete  # all bytes between SYN(0) and FIN(4) contiguous
+
+
+def test_direction_buffer_fin_with_gap():
+    """FIN seen but gap remains → not complete."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    buf.feed(seq=6, ack=0, payload=b'DATA', flags=tcp_mod.TH_ACK)
+    assert not buf.is_complete
+    buf.feed(seq=10, ack=0, payload=b'', flags=tcp_mod.TH_ACK | tcp_mod.TH_FIN)
+    assert not buf.is_complete  # gap 0-4
+    buf.feed(seq=1, ack=0, payload=b'HELLO', flags=tcp_mod.TH_ACK)
+    assert buf.is_complete  # now all bytes received
+
+
+def test_direction_buffer_flush():
+    """flush() outputs all data even with gaps."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    buf.feed(seq=1, ack=0, payload=b'AA', flags=tcp_mod.TH_ACK)
+    buf.feed(seq=6, ack=0, payload=b'BB', flags=tcp_mod.TH_ACK)
+    result = buf.get_data(fill_gaps=True)
+    assert result == b'AA\x00\x00\x00BB'
+    assert buf.total_buffered == 0
+
+
+def test_direction_buffer_flush_no_fill():
+    """flush(fill_gaps=False) only outputs contiguous data."""
+    buf = DirectionBuffer()
+    buf.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    buf.feed(seq=1, ack=0, payload=b'AA', flags=tcp_mod.TH_ACK)
+    buf.feed(seq=6, ack=0, payload=b'BB', flags=tcp_mod.TH_ACK)
+    assert buf.get_data() == b'AA'
+    assert buf.get_data() == b''
+    assert len(buf.segments) == 1  # BB still buffered
