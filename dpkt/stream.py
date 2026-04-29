@@ -7,7 +7,9 @@ import socket
 import struct
 
 from . import dpkt
+from . import ethernet as eth_mod
 from . import ip as ip_mod
+from . import pcap as pcap_mod
 from . import tcp as tcp_mod
 
 
@@ -211,6 +213,7 @@ class StreamReassembler(object):
         self._callbacks = []
 
     def feed(self, ip, tcp_pkt):
+        """Feed one parsed IP+TCP packet."""
         conn_id = (socket.inet_ntoa(ip.src), tcp_pkt.sport,
                    socket.inet_ntoa(ip.dst), tcp_pkt.dport)
         if conn_id not in self.connections:
@@ -221,10 +224,51 @@ class StreamReassembler(object):
                 dst_ip=conn_id[2], dst_port=conn_id[3])
         conn = self.connections[conn_id]
         conn.feed(ip, tcp_pkt)
+        if self.output_mode == 'separate':
+            data_c2s = conn.c2s.get_data(fill_gaps=self.fill_gaps)
+            data_s2c = conn.s2c.get_data(fill_gaps=self.fill_gaps)
+            for cb in self._callbacks:
+                if data_c2s:
+                    cb(conn, data_c2s)
+                if data_s2c:
+                    cb(conn, data_s2c)
+        else:
+            data = conn.merged_data(fill_gaps=self.fill_gaps)
+            for cb in self._callbacks:
+                if data:
+                    cb(conn, data)
         for buf in (conn.c2s, conn.s2c):
             if buf.total_buffered > self.max_buffer_per_dir:
                 buf.get_data(fill_gaps=self.fill_gaps)
         return conn
+
+    def feed_pcap(self, reader):
+        """Feed all packets from one pcap Reader."""
+        for timestamp, buf in reader:
+            self._process_packet(buf)
+
+    def feed_pcaps(self, readers):
+        """Feed packets from multiple pcap Readers."""
+        for reader in readers:
+            self.feed_pcap(reader)
+
+    def _process_packet(self, buf):
+        """Parse Ethernet→IP→TCP and feed to engine."""
+        try:
+            eth = eth_mod.Ethernet(buf)
+        except (dpkt.UnpackError, dpkt.NeedData):
+            return
+        if not isinstance(eth.data, ip_mod.IP):
+            return
+        ip = eth.data
+        if not isinstance(ip.data, tcp_mod.TCP):
+            return
+        self.feed(ip, ip.data)
+
+    def on_data(self, callback):
+        """Register a callback called when new contiguous data arrives.
+        Signature: callback(connection, data_bytes)."""
+        self._callbacks.append(callback)
 
     def _evict_one(self):
         for cid, conn in list(self.connections.items()):
@@ -424,3 +468,53 @@ def test_stream_reassembler_find():
     conn = reasm.find(src='10.0.0.1', sport=12345, dst='10.0.0.2', dport=445)
     assert conn is not None
     assert reasm.find(src='10.0.0.1', sport=99999, dst='10.0.0.2', dport=445) is None
+
+
+def test_stream_reassembler_feed_pcap():
+    """feed_pcap() iterates pcap Reader and calls feed()."""
+    import io
+    tcp_pkt = tcp_mod.TCP(sport=12345, dport=80, seq=0, flags=tcp_mod.TH_SYN, data=b'')
+    ip_pkt = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6, data=tcp_pkt)
+    eth_pkt = eth_mod.Ethernet(src=b'\x00' * 6, dst=b'\x00' * 6, type=eth_mod.ETH_TYPE_IP, data=ip_pkt)
+    pkt_bytes = bytes(eth_pkt)
+    pcap_hdr = struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+    pkt_hdr = struct.pack('<IIII', 0, 0, len(pkt_bytes), len(pkt_bytes))
+    f = io.BytesIO(pcap_hdr + pkt_hdr + pkt_bytes)
+    reasm = StreamReassembler()
+    reasm.feed_pcap(pcap_mod.Reader(f))
+    assert len(reasm.connections) >= 1
+
+
+def test_stream_reassembler_callback():
+    """on_data() callback fires when new contiguous data arrives."""
+    collected = []
+    def cb(conn, data):
+        collected.append(data)
+    ip = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt = tcp_mod.TCP(sport=12345, dport=80, seq=0, flags=tcp_mod.TH_SYN, data=b'')
+    ip.data = tcp_pkt
+    reasm = StreamReassembler()
+    reasm.on_data(cb)
+    reasm.feed(ip, tcp_pkt)
+    ip2 = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt2 = tcp_mod.TCP(sport=12345, dport=80, seq=1, flags=tcp_mod.TH_ACK, data=b'HELLO')
+    ip2.data = tcp_pkt2
+    reasm.feed(ip2, tcp_pkt2)
+    assert len(collected) == 1
+    assert collected[0] == b'HELLO'
+
+
+def test_stream_reassembler_flush():
+    """get_data(fill_gaps=True) forces all buffered data out."""
+    ip = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt = tcp_mod.TCP(sport=12345, dport=80, seq=0, flags=tcp_mod.TH_SYN, data=b'')
+    ip.data = tcp_pkt
+    reasm = StreamReassembler()
+    reasm.feed(ip, tcp_pkt)
+    ip2 = ip_mod.IP(src=b'\x0a\x00\x00\x01', dst=b'\x0a\x00\x00\x02', p=6)
+    tcp_pkt2 = tcp_mod.TCP(sport=12345, dport=80, seq=4, flags=tcp_mod.TH_ACK, data=b'LO')
+    ip2.data = tcp_pkt2
+    reasm.feed(ip2, tcp_pkt2)
+    conn = reasm.find(src='10.0.0.1', sport=12345, dst='10.0.0.2', dport=80)
+    data = conn.c2s.get_data(fill_gaps=True)
+    assert data == b'\x00\x00\x00LO'
