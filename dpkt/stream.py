@@ -518,3 +518,25 @@ def test_stream_reassembler_flush():
     conn = reasm.find(src='10.0.0.1', sport=12345, dst='10.0.0.2', dport=80)
     data = conn.c2s.get_data(fill_gaps=True)
     assert data == b'\x00\x00\x00LO'
+
+
+def test_stream_end_to_end():
+    """Full HTTP flow: SYN→DATA→FIN in both directions."""
+    conn = Connection('10.0.0.1', 12345, '10.0.0.2', 80)
+
+    # Client SYN (seq=0, consuming 1 for SYN → next expected server ack=1)
+    conn.c2s.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    # Server SYN-ACK (seq=5000, ack=1)
+    conn.s2c.feed(seq=5000, ack=1, payload=b'', flags=tcp_mod.TH_SYN | tcp_mod.TH_ACK)
+    # Client request fragmented: GET / +  HTTP/1.1\r\n (5 + 11 = 16 bytes)
+    conn.c2s.feed(seq=1, ack=5001, payload=b'GET /', flags=tcp_mod.TH_ACK)
+    conn.c2s.feed(seq=6, ack=5001, payload=b' HTTP/1.1\r\n', flags=tcp_mod.TH_ACK)
+    # Client FIN (seq=17)
+    conn.c2s.feed(seq=17, ack=5001, payload=b'', flags=tcp_mod.TH_ACK | tcp_mod.TH_FIN)
+    # Server response (seq=5001)
+    conn.s2c.feed(seq=5001, ack=18, payload=b'HTTP/1.1 200 OK\r\n', flags=tcp_mod.TH_ACK)
+
+    request = conn.c2s.get_data()
+    response = conn.s2c.get_data()
+    assert b'GET / HTTP/1.1' in request
+    assert b'200 OK' in response

@@ -69,6 +69,7 @@ from . import smb
 from . import smb2
 from . import ssl
 from . import stp
+from . import stream
 from . import stun
 from . import tcp
 from . import telnet
