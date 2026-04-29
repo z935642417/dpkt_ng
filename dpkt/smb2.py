@@ -216,11 +216,12 @@ class SMB2Read(dpkt.Packet):
         self.length = struct.unpack('<I', buf[4:8])[0]
         self.offset = struct.unpack('<Q', buf[8:16])[0]
         self.file_id = buf[16:32]
-        self.channel = struct.unpack('<I', buf[32:36])[0]
-        self.remaining = struct.unpack('<I', buf[36:40])[0]
-        self.channel_info_offset = struct.unpack('<H', buf[40:42])[0]
-        self.channel_info_length = struct.unpack('<H', buf[42:44])[0]
-        self.flags = struct.unpack('<I', buf[44:48])[0] if len(buf) >= 48 else 0
+        self.minimum_count = struct.unpack('<I', buf[32:36])[0]
+        self.channel = struct.unpack('<I', buf[36:40])[0]
+        self.remaining = struct.unpack('<I', buf[40:44])[0]
+        self.channel_info_offset = struct.unpack('<H', buf[44:46])[0]
+        self.channel_info_length = struct.unpack('<H', buf[46:48])[0]
+        self.flags = struct.unpack('<I', buf[48:52])[0] if len(buf) >= 52 else 0
         self.data = b''
 
     def __bytes__(self):
@@ -238,13 +239,14 @@ class SMB2Read(dpkt.Packet):
             getattr(self, '_rsv2', b'\x00' * 4)) + self.file_data
 
     def _pack_request(self):
-        return struct.pack('<HBBIQ16sIIHHI',
+        return struct.pack('<HBBIQ16sIIIHHI',
             getattr(self, 'struct_size', 49),
             getattr(self, 'padding', 0),
             getattr(self, '_flags', 0),
             getattr(self, 'length', 0),
             getattr(self, 'offset', 0),
             getattr(self, 'file_id', b'\xff' * 16),
+            getattr(self, 'minimum_count', 0),
             getattr(self, 'channel', 0),
             getattr(self, 'remaining', 0),
             getattr(self, 'channel_info_offset', 0),
@@ -421,6 +423,7 @@ def test_smb2_read_request_roundtrip():
     read_req.length = 4096
     read_req.offset = 0
     read_req.file_id = b'\xff' * 16
+    read_req.minimum_count = 1
     read_req.channel = 0
     read_req.remaining = 0
     read_req.channel_info_offset = 0
@@ -433,6 +436,7 @@ def test_smb2_read_request_roundtrip():
     assert isinstance(parsed.data, SMB2Read)
     assert parsed.data.struct_size == 49
     assert parsed.data.length == 4096
+    assert parsed.data.minimum_count == 1
 
 
 def test_smb2_close_roundtrip():
