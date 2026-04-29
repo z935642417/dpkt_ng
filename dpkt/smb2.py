@@ -254,12 +254,80 @@ class SMB2Read(dpkt.Packet):
             getattr(self, 'flags', 0))
 
 
+class SMB2Write(dpkt.Packet):
+    """SMB2 WRITE Request/Response."""
+    __byte_order__ = '<'
+
+    def __init__(self, *args, **kwargs):
+        self.file_data = b''
+        super(SMB2Write, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        struct_size = struct.unpack('<H', buf[0:2])[0]
+        if struct_size == 17:
+            self._unpack_response(buf)
+        else:
+            self._unpack_request(buf)
+
+    def _unpack_request(self, buf):
+        self.struct_size = struct.unpack('<H', buf[0:2])[0]
+        self.data_offset = struct.unpack('<H', buf[2:4])[0]
+        self.length = struct.unpack('<I', buf[4:8])[0]
+        self.offset = struct.unpack('<Q', buf[8:16])[0]
+        self.file_id = buf[16:32]
+        self.channel = struct.unpack('<I', buf[32:36])[0]
+        self.remaining = struct.unpack('<I', buf[36:40])[0]
+        self.channel_info_offset = struct.unpack('<H', buf[40:42])[0]
+        self.channel_info_length = struct.unpack('<H', buf[42:44])[0]
+        self.write_flags = struct.unpack('<I', buf[44:48])[0] if len(buf) >= 48 else 0
+        start = self.data_offset - 64
+        self.file_data = buf[start:start + self.length]
+        self.data = b''
+
+    def _unpack_response(self, buf):
+        self.struct_size = struct.unpack('<H', buf[0:2])[0]
+        self._rsv = struct.unpack('<H', buf[2:4])[0]
+        self.count = struct.unpack('<I', buf[4:8])[0]
+        self.remaining = struct.unpack('<I', buf[8:12])[0]
+        self.channel_info_offset = struct.unpack('<H', buf[12:14])[0]
+        self.channel_info_length = struct.unpack('<H', buf[14:16])[0]
+        self.data = b''
+
+    def __bytes__(self):
+        if hasattr(self, 'struct_size') and self.struct_size == 17:
+            return self._pack_response()
+        return self._pack_request()
+
+    def _pack_request(self):
+        return struct.pack('<HHIQ16sIIHHI',
+            getattr(self, 'struct_size', 49),
+            getattr(self, 'data_offset', 0),
+            getattr(self, 'length', len(self.file_data)),
+            getattr(self, 'offset', 0),
+            getattr(self, 'file_id', b'\xff' * 16),
+            getattr(self, 'channel', 0),
+            getattr(self, 'remaining', 0),
+            getattr(self, 'channel_info_offset', 0),
+            getattr(self, 'channel_info_length', 0),
+            getattr(self, 'write_flags', 0)) + self.file_data
+
+    def _pack_response(self):
+        return struct.pack('<HHIIHH',
+            getattr(self, 'struct_size', 17),
+            getattr(self, '_rsv', 0),
+            getattr(self, 'count', 0),
+            getattr(self, 'remaining', 0),
+            getattr(self, 'channel_info_offset', 0),
+            getattr(self, 'channel_info_length', 0))
+
+
 SMB2._cmdsw[SMB2_CMD_NEGOTIATE] = SMB2Negotiate
 SMB2._cmdsw[SMB2_CMD_SESSION_SETUP] = SMB2SessionSetup
 SMB2._cmdsw[SMB2_CMD_TREE_CONNECT] = SMB2TreeConnect
 SMB2._cmdsw[SMB2_CMD_CREATE] = SMB2Create
 SMB2._cmdsw[SMB2_CMD_CLOSE] = SMB2Close
 SMB2._cmdsw[SMB2_CMD_READ] = SMB2Read
+SMB2._cmdsw[SMB2_CMD_WRITE] = SMB2Write
 
 
 def _mod_init():
@@ -447,3 +515,26 @@ def test_smb2_close_roundtrip():
     parsed = SMB2(data)
     assert isinstance(parsed.data, SMB2Close)
     assert parsed.data.flags == 1
+
+
+def test_smb2_write_request():
+    """Test SMB2 WRITE request with file data extraction."""
+    write_req = SMB2Write()
+    write_req.struct_size = 49
+    write_req.data_offset = 112  # 64 (SMB2 header) + 48 (Write header)
+    write_req.length = 11
+    write_req.offset = 0
+    write_req.file_id = b'\xff' * 16
+    write_req.channel = 0
+    write_req.remaining = 0
+    write_req.channel_info_offset = 0
+    write_req.channel_info_length = 0
+    write_req.write_flags = 0
+    write_req.file_data = b'Hello World'
+
+    smb2 = SMB2(cmd=SMB2_CMD_WRITE, mid=1, data=write_req)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert parsed.cmd == SMB2_CMD_WRITE
+    assert isinstance(parsed.data, SMB2Write)
+    assert parsed.data.file_data == b'Hello World'
