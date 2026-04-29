@@ -470,6 +470,128 @@ class SMB2OplockBreak(dpkt.Packet):
     ]
 
 
+class SMB2QueryDirectory(dpkt.Packet):
+    """SMB2 QUERY_DIRECTORY Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 33),
+        ('file_info_class', 'B', 0),
+        ('flags', 'B', 0),
+        ('file_index', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.file_name = b''
+        self.output_data = b''
+        super(SMB2QueryDirectory, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        off = self.__hdr_len__
+        self.file_name_offset, self.file_name_length = struct.unpack('<HH', buf[off:off + 4]); off += 4
+        self.output_offset, self.output_length = struct.unpack('<II', buf[off:off + 8])
+        fn_start = self.file_name_offset - 64 if self.file_name_offset >= 64 else 0
+        out_start = self.output_offset - 64 if self.output_offset >= 64 else 0
+        if self.file_name_length:
+            self.file_name = buf[fn_start:fn_start + self.file_name_length]
+        if self.output_length:
+            self.output_data = buf[out_start:out_start + self.output_length]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = dpkt.Packet.__bytes__(self)
+        file_name_offset = 64 + len(hdr) + 12 if self.file_name else 0
+        output_offset = 64 + len(hdr) + 12 + len(self.file_name) if self.output_data else 0
+        mid = struct.pack('<HHII',
+            file_name_offset, len(self.file_name),
+            output_offset, len(self.output_data))
+        return hdr + mid + self.file_name + self.output_data
+
+
+class SMB2QueryInfo(dpkt.Packet):
+    """SMB2 QUERY_INFO Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 41),
+        ('info_type', 'B', 0),
+        ('file_info_class', 'B', 0),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.output_data = b''
+        self.input_data = b''
+        super(SMB2QueryInfo, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        off = self.__hdr_len__
+        self.output_buffer_length = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.input_buffer_offset = struct.unpack('<H', buf[off:off + 2])[0]; off += 2
+        self._rsv = struct.unpack('<H', buf[off:off + 2])[0]; off += 2
+        self.input_buffer_length = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.additional_info = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.flags = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.file_id = buf[off:off + 16]
+        in_start = self.input_buffer_offset - 64 if self.input_buffer_offset >= 64 else 0
+        if self.input_buffer_length:
+            self.input_data = buf[in_start:in_start + self.input_buffer_length]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = dpkt.Packet.__bytes__(self)
+        input_offset = 64 + len(hdr) + 36 if self.input_data else 0
+        mid = struct.pack('<IHHIII16s',
+            getattr(self, 'output_buffer_length', 0),
+            input_offset,
+            getattr(self, '_rsv', 0),
+            len(self.input_data),
+            getattr(self, 'additional_info', 0),
+            getattr(self, 'flags', 0),
+            getattr(self, 'file_id', b'\xff' * 16))
+        return hdr + mid + self.input_data
+
+
+class SMB2SetInfo(dpkt.Packet):
+    """SMB2 SET_INFO Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 33),
+        ('info_type', 'B', 0),
+        ('file_info_class', 'B', 0),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.buffer_data = b''
+        super(SMB2SetInfo, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        off = self.__hdr_len__
+        self.buffer_length = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.buffer_offset = struct.unpack('<H', buf[off:off + 2])[0]; off += 2
+        self._rsv = struct.unpack('<H', buf[off:off + 2])[0]; off += 2
+        self.additional_info = struct.unpack('<I', buf[off:off + 4])[0]; off += 4
+        self.file_id = buf[off:off + 16]; off += 16
+        self._rsv2 = struct.unpack('<I', buf[off:off + 4])[0] if len(buf) >= off + 4 else 0
+        buf_start = self.buffer_offset - 64 if self.buffer_offset >= 64 else 0
+        if self.buffer_length:
+            self.buffer_data = buf[buf_start:buf_start + self.buffer_length]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = dpkt.Packet.__bytes__(self)
+        buffer_offset = 64 + len(hdr) + 32 if self.buffer_data else 0
+        mid = struct.pack('<IHHI16sI',
+            len(self.buffer_data),
+            buffer_offset,
+            getattr(self, '_rsv', 0),
+            getattr(self, 'additional_info', 0),
+            getattr(self, 'file_id', b'\xff' * 16),
+            getattr(self, '_rsv2', 0))
+        return hdr + mid + self.buffer_data
+
+
 def _mod_init():
     for name, val in list(globals().items()):
         if name.startswith('SMB2_CMD_'):
@@ -781,3 +903,30 @@ def test_smb2_oplock_break():
     parsed = SMB2(data)
     assert isinstance(parsed.data, SMB2OplockBreak)
     assert parsed.data.oplock_level == 1
+
+
+def test_smb2_query_directory():
+    qd = SMB2QueryDirectory(file_info_class=1, file_index=0)
+    s = SMB2(cmd=SMB2_CMD_QUERY_DIRECTORY, mid=1, data=qd)
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2QueryDirectory)
+    assert parsed.data.file_info_class == 1
+
+
+def test_smb2_query_info():
+    qi = SMB2QueryInfo(info_type=1, file_info_class=5)
+    s = SMB2(cmd=SMB2_CMD_QUERY_INFO, mid=1, data=qi)
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2QueryInfo)
+    assert parsed.data.info_type == 1
+
+
+def test_smb2_set_info():
+    si = SMB2SetInfo(info_type=1, file_info_class=0x14)
+    s = SMB2(cmd=SMB2_CMD_SET_INFO, mid=1, data=si)
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2SetInfo)
+    assert parsed.data.info_type == 1
