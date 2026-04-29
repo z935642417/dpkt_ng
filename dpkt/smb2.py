@@ -47,7 +47,7 @@ class SMB2(dpkt.Packet):
         ('proto', '4s', b'\xfeSMB'),
         ('hdr_len', 'H', 64),
         ('credit_charge', 'H', 0),
-        ('_chan_seq', 'I', 0),
+        ('_status', 'I', 0),
         ('cmd', 'H', 0),
         ('credit_req', 'H', 0),
         ('_flags', 'I', 0),
@@ -60,10 +60,10 @@ class SMB2(dpkt.Packet):
     ]
     __bit_fields__ = {
         '_flags': (
-            ('_rsv6', 2),
+            ('_rsv_hi', 2),
             ('replay', 1),
             ('dfs', 1),
-            ('_rsv7', 21),
+            ('_rsv_mid', 21),
             ('priority', 3),
             ('signed', 1),
             ('related', 1),
@@ -95,14 +95,27 @@ def test_smb2_flags():
     assert (smb2._flags & 1) == 1
     smb2.signed = 1
     assert smb2.signed == 1
+    assert smb2.response == 1
+    smb2.dfs = 1
+    assert smb2.dfs == 1
+    smb2.replay = 1
+    assert smb2.replay == 1
+    setattr(smb2, 'async', 1)
+    assert getattr(smb2, 'async') == 1
+    smb2.related = 1
+    assert smb2.related == 1
+    assert smb2.response == 1
+    assert smb2.signed == 1
 
 
 def test_smb2_roundtrip():
     """Test SMB2 pack → unpack → bytes."""
-    smb2 = SMB2(cmd=SMB2_CMD_NEGOTIATE, mid=1, pid=0x1234, tid=0x5678, sid=0x9ABC)
+    smb2 = SMB2(cmd=SMB2_CMD_READ, mid=1, pid=0x1234, tid=0x5678, sid=0x9ABC)
     data = bytes(smb2)
     assert len(data) == 64
     parsed = SMB2(data)
-    assert parsed.cmd == SMB2_CMD_NEGOTIATE
+    assert parsed.cmd == SMB2_CMD_READ
     assert parsed.mid == 1
     assert parsed.pid == 0x1234
+    assert parsed.tid == 0x5678
+    assert parsed.sid == 0x9ABC
