@@ -5,6 +5,7 @@ from __future__ import print_function
 from __future__ import absolute_import
 
 from . import dpkt
+import struct
 
 
 # https://msdn.microsoft.com/en-us/library/ee441774.aspx
@@ -31,6 +32,25 @@ SMB_FLAGS2_NT_STATUS = 0x4000
 SMB_FLAGS2_UNICODE = 0x8000
 
 SMB_STATUS_SUCCESS = 0x00000000
+
+# SMB1 Command codes
+SMB_CMD_CREATE_DIRECTORY = 0x00
+SMB_CMD_CLOSE = 0x04
+SMB_CMD_TRANS2 = 0x25
+SMB_CMD_OPEN_ANDX = 0x2D
+SMB_CMD_READ_ANDX = 0x2E
+SMB_CMD_WRITE_ANDX = 0x2F
+SMB_CMD_TRANS = 0x32
+SMB_CMD_LOGOFF_ANDX = 0x70
+SMB_CMD_TREE_DISCONNECT = 0x71
+SMB_CMD_NEGOTIATE = 0x72
+SMB_CMD_SESSION_SETUP_ANDX = 0x73
+SMB_CMD_ECHO = 0x74
+SMB_CMD_TREE_CONNECT_ANDX = 0x75
+SMB_CMD_NT_TRANS = 0xA0
+SMB_CMD_NT_TRANS_SECONDARY = 0xA1
+SMB_CMD_NT_CREATE_ANDX = 0xA2
+SMB_CMD_OPEN = 0xC0
 
 
 class SMB(dpkt.Packet):
@@ -82,6 +102,54 @@ class SMB(dpkt.Packet):
         self._pidhi = v >> 16
         self._pidlo = v & 0xffff
 
+    _cmdsw = {}
+
+    def __init__(self, *args, **kwargs):
+        self.commands = []
+        super(SMB, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.commands = []
+        offset = self.__hdr_len__
+        next_cmd = self.cmd
+        while True:
+            cmd_cls = self._cmdsw.get(next_cmd)
+            if cmd_cls is None:
+                break
+            try:
+                cmd = cmd_cls(buf[offset:])
+                self.commands.append(cmd)
+                next_cmd = getattr(cmd, 'andx_command', 0xFF)
+                andx_off = getattr(cmd, 'andx_offset', 0)
+                if next_cmd == 0xFF or andx_off == 0:
+                    break
+                offset = offset + andx_off
+            except (dpkt.UnpackError, struct.error):
+                break
+        self.data = b''
+
+
+class SMB1Command(dpkt.Packet):
+    """Base class for all SMB1 commands using WordCount/ByteCount pattern."""
+    __byte_order__ = '<'
+
+    def __init__(self, *args, **kwargs):
+        self.andx_command = 0xFF
+        self.andx_offset = 0
+        super(SMB1Command, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.word_count = buf[0]
+        params_start = 1
+        params_end = params_start + self.word_count * 2
+        self._params = buf[params_start:params_end]
+        bc_off = params_end
+        self.byte_count = struct.unpack('<H', buf[bc_off:bc_off + 2])[0]
+        data_off = bc_off + 2
+        self._raw_data = buf[data_off:data_off + self.byte_count]
+        self.data = b''
+
 
 def test_smb():
     buf = (b'\xffSMB\xa0\x00\x00\x00\x00\x08\x03\xc8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
@@ -100,4 +168,15 @@ def test_smb():
     smb.pid = 0x00081020
     smb.uid = 0x800
     assert str(smb) == str(b'\xffSMB\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00'
-                           b'\x00\x00\x00\x00\x00\x00\x00\x20\x10\x00\x08\x00\x00')
+                            b'\x00\x00\x00\x00\x00\x00\x00\x20\x10\x00\x08\x00\x00')
+
+
+def test_smb1_andx_chain():
+    """Test SMB1 ANDX chain detection (no commands registered yet, should have empty commands list)."""
+    buf = (b'\xffSMB\x75\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x07\x00\xff\x00'
+           b'\x00\x00')
+    smb = SMB(buf)
+    assert smb.proto == b'\xffSMB'
+    # No commands registered yet, so commands should be empty
+    assert smb.commands == []
