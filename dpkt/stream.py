@@ -119,6 +119,84 @@ class DirectionBuffer(object):
                 and len(self.segments) == 0)
 
 
+class Connection(object):
+    """One TCP connection with bidirectional reassembly buffers."""
+    def __init__(self, src_ip, src_port, dst_ip, dst_port):
+        self.src_ip = src_ip
+        self.src_port = src_port
+        self.dst_ip = dst_ip
+        self.dst_port = dst_port
+        self.c2s = DirectionBuffer()
+        self.s2c = DirectionBuffer()
+        self.client_isn = None
+        self.server_isn = None
+
+    @property
+    def conn_id(self):
+        return (self.src_ip, self.src_port, self.dst_ip, self.dst_port)
+
+    @property
+    def is_closed(self):
+        return self.c2s.is_complete and self.s2c.is_complete
+
+    def feed(self, ip, tcp):
+        """Feed a parsed IP+TCP packet to the correct direction."""
+        if tcp.sport == self.src_port:
+            self.c2s.feed(tcp.seq, tcp.ack, tcp.data, tcp.flags)
+        else:
+            self.s2c.feed(tcp.seq, tcp.ack, tcp.data, tcp.flags)
+
+    def merged_data(self, fill_gaps=False):
+        """Return a single byte sequence with both directions ordered by seq/ack causality."""
+        items = []  # [(dir, rel_seq, ack, data), ...]
+        # c2s contiguous
+        if self.c2s.contiguous:
+            base = self.c2s.next_seq - len(self.c2s.contiguous)
+            items.append(('c2s', base, 0, bytes(self.c2s.contiguous)))
+        for rel_seq, ack, data in self.c2s.segments:
+            items.append(('c2s', rel_seq, ack, data))
+        # s2c contiguous
+        if self.s2c.contiguous:
+            base = self.s2c.next_seq - len(self.s2c.contiguous)
+            items.append(('s2c', base, 0, bytes(self.s2c.contiguous)))
+        for rel_seq, ack, data in self.s2c.segments:
+            items.append(('s2c', rel_seq, ack, data))
+
+        if not items:
+            return b''
+
+        # Sort: lower seq first; c2s before s2c when no ack relationship
+        def sort_key(item):
+            direction, rel_seq, ack, data = item
+            return (rel_seq, 0 if direction == 'c2s' else 1)
+
+        items.sort(key=sort_key)
+
+        # Build merged output
+        result = bytearray()
+        pos = 0
+        for direction, rel_seq, ack, data in items:
+            if fill_gaps and rel_seq > pos:
+                result.extend(b'\x00' * (rel_seq - pos))
+            if not fill_gaps:
+                result.extend(data)
+            else:
+                overlap = max(0, pos - rel_seq)
+                if overlap < len(data):
+                    result.extend(data[overlap:])
+            pos = max(pos, rel_seq + len(data))
+
+        # Clear both buffers after merge
+        self.c2s.contiguous = bytearray()
+        self.c2s.segments = []
+        self.c2s.total_buffered = 0
+        self.s2c.contiguous = bytearray()
+        self.s2c.segments = []
+        self.s2c.total_buffered = 0
+
+        return bytes(result)
+
+
 def test_direction_buffer_syn():
     """SYN sets ISN and advances next_seq by 1."""
     buf = DirectionBuffer()
@@ -213,3 +291,36 @@ def test_direction_buffer_flush_no_fill():
     assert buf.get_data() == b'AA'
     assert buf.get_data() == b''
     assert len(buf.segments) == 1  # BB still buffered
+
+
+def test_connection_routing():
+    """Connection routes packets to correct direction based on sport."""
+    conn = Connection(src_ip='10.0.0.1', src_port=12345, dst_ip='10.0.0.2', dst_port=445)
+    # SYN from client
+    conn.c2s.feed(seq=100, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    conn.c2s.feed(seq=101, ack=0, payload=b'CMD', flags=tcp_mod.TH_ACK)
+    # SYN from server
+    conn.s2c.feed(seq=5000, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    conn.s2c.feed(seq=5001, ack=0, payload=b'RSP', flags=tcp_mod.TH_ACK)
+    assert conn.c2s.get_data() == b'CMD'
+    assert conn.s2c.get_data() == b'RSP'
+
+
+def test_connection_merged_ordering():
+    """merged_data() orders by seq/ack causality."""
+    conn = Connection(src_ip='10.0.0.1', src_port=12345, dst_ip='10.0.0.2', dst_port=445)
+    # Client sends request
+    conn.c2s.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    conn.c2s.feed(seq=1, ack=0, payload=b'GET', flags=tcp_mod.TH_ACK)
+    # Server sends response
+    conn.s2c.feed(seq=0, ack=0, payload=b'', flags=tcp_mod.TH_SYN)
+    conn.s2c.feed(seq=1, ack=0, payload=b'HTTP', flags=tcp_mod.TH_ACK)
+    merged = conn.merged_data()
+    assert merged == b'GETHTTP'
+
+
+def test_connection_properties():
+    """conn_id and is_closed properties."""
+    conn = Connection(src_ip='10.0.0.1', src_port=12345, dst_ip='10.0.0.2', dst_port=80)
+    assert conn.conn_id == ('10.0.0.1', 12345, '10.0.0.2', 80)
+    assert not conn.is_closed
