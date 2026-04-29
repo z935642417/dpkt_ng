@@ -387,6 +387,89 @@ class SMB2Lock(dpkt.Packet):
         return hdr[:self.__hdr_len__] + locks_buf
 
 
+class SMB2Ioctl(dpkt.Packet):
+    """SMB2 IOCTL Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 57),
+        ('_rsv1', 'H', 0),
+        ('ctl_code', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.in_data = b''
+        self.out_data = b''
+        super(SMB2Ioctl, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        off = self.__hdr_len__
+        self.in_offset, self.in_length = struct.unpack('<II', buf[off:off + 8])
+        off += 8
+        self.max_in_size, self.out_offset = struct.unpack('<II', buf[off:off + 8])
+        off += 8
+        self.out_length, self.max_out_size = struct.unpack('<II', buf[off:off + 8])
+        off += 8
+        self.flags = struct.unpack('<I', buf[off:off + 4])[0]
+        self._rsv2 = buf[off + 4:off + 8]
+        in_start = self.in_offset - 64 if self.in_offset >= 64 else self.in_offset
+        out_start = self.out_offset - 64 if self.out_offset >= 64 else self.out_offset
+        if self.in_length:
+            self.in_data = buf[in_start:in_start + self.in_length]
+        if self.out_length:
+            self.out_data = buf[out_start:out_start + self.out_length]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = dpkt.Packet.__bytes__(self).ljust(64)
+        in_offset = 64 + self.__hdr_len__ if self.in_data else 0
+        out_offset = 64 + self.__hdr_len__ + len(self.in_data) if self.out_data else 0
+        mid = struct.pack('<IIIIIIII',
+            in_offset, len(self.in_data),
+            getattr(self, 'max_in_size', 0), out_offset,
+            len(self.out_data), getattr(self, 'max_out_size', 0),
+            getattr(self, 'flags', 0), 0)
+        return hdr + mid + self.in_data + self.out_data
+
+
+class SMB2Cancel(dpkt.Packet):
+    """SMB2 CANCEL — minimal body."""
+    __byte_order__ = '<'
+    __hdr__ = [('struct_size', 'H', 4)]
+
+
+class SMB2Echo(dpkt.Packet):
+    """SMB2 ECHO Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [('struct_size', 'H', 4)]
+
+
+class SMB2ChangeNotify(dpkt.Packet):
+    """SMB2 CHANGE_NOTIFY Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 32),
+        ('flags', 'H', 0),
+        ('output_buffer_length', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+        ('completion_filter', 'I', 0),
+        ('_rsv', 'I', 0),
+    ]
+
+
+class SMB2OplockBreak(dpkt.Packet):
+    """SMB2 OPLOCK_BREAK."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 24),
+        ('oplock_level', 'B', 0),
+        ('_rsv1', 'B', 0),
+        ('_rsv2', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+
 def _mod_init():
     for name, val in list(globals().items()):
         if name.startswith('SMB2_CMD_'):
@@ -660,3 +743,41 @@ def test_smb2_lock():
     assert isinstance(parsed.data, SMB2Lock)
     assert len(parsed.data.locks) == 2
     assert parsed.data.locks[0]['length'] == 100
+
+
+def test_smb2_ioctl():
+    s = SMB2(cmd=SMB2_CMD_IOCTL, mid=1, data=SMB2Ioctl(ctl_code=0x00110014))
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Ioctl)
+    assert parsed.data.ctl_code == 0x00110014
+
+
+def test_smb2_cancel():
+    s = SMB2(cmd=SMB2_CMD_CANCEL, mid=1, data=SMB2Cancel())
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Cancel)
+
+
+def test_smb2_echo():
+    s = SMB2(cmd=SMB2_CMD_ECHO, mid=1, data=SMB2Echo())
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Echo)
+
+
+def test_smb2_change_notify():
+    s = SMB2(cmd=SMB2_CMD_CHANGE_NOTIFY, mid=1, data=SMB2ChangeNotify(completion_filter=0x1F))
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2ChangeNotify)
+    assert parsed.data.completion_filter == 0x1F
+
+
+def test_smb2_oplock_break():
+    s = SMB2(cmd=SMB2_CMD_OPLOCK_BREAK, mid=1, data=SMB2OplockBreak(oplock_level=1))
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2OplockBreak)
+    assert parsed.data.oplock_level == 1
