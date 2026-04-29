@@ -321,6 +321,72 @@ class SMB2Write(dpkt.Packet):
             getattr(self, 'channel_info_length', 0))
 
 
+class SMB2Logoff(dpkt.Packet):
+    """SMB2 LOGOFF Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 4),
+        ('_rsv', 'H', 0),
+    ]
+
+
+class SMB2TreeDisconnect(dpkt.Packet):
+    """SMB2 TREE_DISCONNECT Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 4),
+        ('_rsv', 'H', 0),
+    ]
+
+
+class SMB2Flush(dpkt.Packet):
+    """SMB2 FLUSH Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 24),
+        ('_rsv1', 'H', 0),
+        ('_rsv2', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+
+class SMB2Lock(dpkt.Packet):
+    """SMB2 LOCK Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 48),
+        ('lock_count', 'H', 0),
+        ('lock_sequence', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.locks = []
+        super(SMB2Lock, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.locks = []
+        off = self.__hdr_len__
+        for _ in range(self.lock_count):
+            if off + 24 > len(buf):
+                break
+            lock_offset, lock_length, lock_flags, lock_rsv = struct.unpack('<QQII', buf[off:off + 24])
+            self.locks.append({
+                'offset': lock_offset, 'length': lock_length,
+                'flags': lock_flags, '_rsv': lock_rsv
+            })
+            off += 24
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = dpkt.Packet.__bytes__(self)
+        locks_buf = b''
+        for lock in self.locks:
+            locks_buf += struct.pack('<QQII', lock['offset'], lock['length'], lock['flags'], lock['_rsv'])
+        return hdr[:self.__hdr_len__] + locks_buf
+
+
 def _mod_init():
     for name, val in list(globals().items()):
         if name.startswith('SMB2_CMD_'):
@@ -561,3 +627,36 @@ def test_smb2_mod_init():
     assert SMB2_CMD_WRITE in SMB2._cmdsw
     assert SMB2_CMD_CLOSE in SMB2._cmdsw
     assert SMB2._cmdsw[SMB2_CMD_NEGOTIATE] is SMB2Negotiate
+
+
+def test_smb2_logoff():
+    s = SMB2(cmd=SMB2_CMD_LOGOFF, mid=1, data=SMB2Logoff())
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Logoff)
+
+
+def test_smb2_tree_disconnect():
+    s = SMB2(cmd=SMB2_CMD_TREE_DISCONNECT, mid=1, data=SMB2TreeDisconnect())
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2TreeDisconnect)
+
+
+def test_smb2_flush():
+    s = SMB2(cmd=SMB2_CMD_FLUSH, mid=1, data=SMB2Flush())
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Flush)
+
+
+def test_smb2_lock():
+    lock = SMB2Lock(lock_count=2)
+    lock.locks = [{'offset': 0, 'length': 100, 'flags': 1, '_rsv': 0},
+                  {'offset': 200, 'length': 50, 'flags': 0, '_rsv': 0}]
+    s = SMB2(cmd=SMB2_CMD_LOCK, mid=1, data=lock)
+    data = bytes(s)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Lock)
+    assert len(parsed.data.locks) == 2
+    assert parsed.data.locks[0]['length'] == 100
