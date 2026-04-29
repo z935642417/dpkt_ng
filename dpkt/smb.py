@@ -151,6 +151,102 @@ class SMB1Command(dpkt.Packet):
         self.data = b''
 
 
+class SMB1Negotiate(SMB1Command):
+    """SMB1 Negotiate Protocol."""
+
+    def unpack(self, buf):
+        self.word_count = buf[0]
+        params_start = 1
+        if self.word_count > 0:
+            self._params = buf[params_start:params_start + self.word_count * 2]
+        else:
+            self._params = b''
+        params_end = params_start + self.word_count * 2
+        bc_off = params_end
+        self.byte_count = struct.unpack('<H', buf[bc_off:bc_off + 2])[0]
+        data_off = bc_off + 2
+        self._raw_data = buf[data_off:data_off + self.byte_count]
+        self.dialects = []
+        if self.word_count == 0 and self._raw_data:
+            d = self._raw_data
+            while d:
+                try:
+                    end = d.index(b'\x00')
+                    self.dialects.append(d[:end])
+                    d = d[end + 1:]
+                except ValueError:
+                    if len(d) > 0:
+                        self.dialects.append(d)
+                    break
+        self.data = b''
+
+
+class SMB1SessionSetupAndX(SMB1Command):
+    """SMB1 Session Setup AndX."""
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+
+
+class SMB1TreeConnectAndX(SMB1Command):
+    """SMB1 Tree Connect AndX."""
+
+    def __init__(self, *args, **kwargs):
+        self.path = b''
+        self.service = b''
+        super(SMB1TreeConnectAndX, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+        if len(self._params) >= 6:
+            self.flags = struct.unpack('<H', self._params[4:6])[0]
+        if self._raw_data:
+            parts = self._raw_data.split(b'\x00', 1)
+            self.path = parts[0] if len(parts) > 0 else b''
+            self.service = parts[1] if len(parts) > 1 else b''
+
+
+class SMB1NTCreateAndX(SMB1Command):
+    """SMB1 NT Create AndX."""
+
+    def __init__(self, *args, **kwargs):
+        self.file_name = b''
+        super(SMB1NTCreateAndX, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+        if len(self._params) >= 28:
+            self.name_length = struct.unpack('<H', self._params[20:22])[0]
+            if self.name_length and len(self._raw_data) >= self.name_length + 1:
+                self.file_name = self._raw_data[1:1 + self.name_length]
+
+
+class SMB1Close(SMB1Command):
+    """SMB1 Close."""
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+
+
+SMB._cmdsw[SMB_CMD_NEGOTIATE] = SMB1Negotiate
+SMB._cmdsw[SMB_CMD_SESSION_SETUP_ANDX] = SMB1SessionSetupAndX
+SMB._cmdsw[SMB_CMD_TREE_CONNECT_ANDX] = SMB1TreeConnectAndX
+SMB._cmdsw[SMB_CMD_NT_CREATE_ANDX] = SMB1NTCreateAndX
+SMB._cmdsw[SMB_CMD_CLOSE] = SMB1Close
+
+
 def test_smb():
     buf = (b'\xffSMB\xa0\x00\x00\x00\x00\x08\x03\xc8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
            b'\x00\x00\x08\xfa\x7a\x00\x08\x53\x02')
@@ -172,11 +268,37 @@ def test_smb():
 
 
 def test_smb1_andx_chain():
-    """Test SMB1 ANDX chain detection (no commands registered yet, should have empty commands list)."""
+    """Test SMB1 ANDX chain detection (TreeConnectAndX registered)."""
     buf = (b'\xffSMB\x75\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
            b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x07\x00\xff\x00'
            b'\x00\x00')
     smb = SMB(buf)
     assert smb.proto == b'\xffSMB'
-    # No commands registered yet, so commands should be empty
-    assert smb.commands == []
+    assert len(smb.commands) == 1
+
+
+def test_smb1_negotiate():
+    """SMB1 Negotiate should parse dialects."""
+    buf = (b'\xffSMB\x72\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x17\x00'
+           b'PC NETWORK PROGRAM 1.0\x00')
+    smb = SMB(buf)
+    assert len(smb.commands) == 1
+    assert isinstance(smb.commands[0], SMB1Negotiate)
+    assert b'PC NETWORK PROGRAM 1.0' in smb.commands[0].dialects
+
+
+def test_smb1_nt_create_andx():
+    """SMB1 NTCreateAndX with file name."""
+    buf = (b'\xffSMB\xa2\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x18'
+           b'\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+           b'\x0a\x00'
+           b'\x00test.txt\x00')
+    parsed = SMB(buf)
+    assert len(parsed.commands) == 1
+    assert isinstance(parsed.commands[0], SMB1NTCreateAndX)
