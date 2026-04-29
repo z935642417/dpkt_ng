@@ -98,7 +98,80 @@ class SMB2Negotiate(dpkt.Packet):
     ]
 
 
+class SMB2SessionSetup(dpkt.Packet):
+    """SMB2 SESSION_SETUP Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 25),
+        ('flags', 'B', 0),
+        ('security_mode', 'B', 0),
+        ('capabilities', 'I', 0),
+        ('channel', 'I', 0),
+        ('security_blob_offset', 'H', 0),
+        ('security_blob_length', 'H', 0),
+        ('prev_session_id', 'Q', 0),
+    ]
+
+
+class SMB2TreeConnect(dpkt.Packet):
+    """SMB2 TREE_CONNECT Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 9),
+        ('_flags_val', 'H', 0),
+        ('path_offset', 'H', 0),
+        ('path_length', 'H', 0),
+    ]
+    __bit_fields__ = {
+        '_flags_val': (
+            ('_rsv1', 4),
+            ('cluster_reconnect', 1),
+            ('_rsv2', 3),
+            ('redirect_to_owner', 1),
+            ('extension_present', 1),
+            ('_rsv3', 6),
+        ),
+    }
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        start = self.path_offset - self.__hdr_len__
+        self.path = buf[start:start + self.path_length]
+        self.data = b''
+
+
+class SMB2Create(dpkt.Packet):
+    """SMB2 CREATE Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 57),
+        ('security_flags', 'B', 0),
+        ('req_oplock_level', 'B', 0),
+        ('impersonation_level', 'I', 0),
+        ('smb_create_flags', 'Q', 0),
+        ('_rsv', 'Q', 0),
+        ('desired_access', 'I', 0),
+        ('file_attributes', 'I', 0),
+        ('share_access', 'I', 0),
+        ('create_disposition', 'I', 0),
+        ('create_options', 'I', 0),
+        ('name_offset', 'H', 0),
+        ('name_length', 'H', 0),
+        ('create_contexts_offset', 'I', 0),
+        ('create_contexts_length', 'I', 0),
+    ]
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        start = self.name_offset - self.__hdr_len__
+        self.file_name = buf[start:start + self.name_length]
+        self.data = b''
+
+
 SMB2._cmdsw[SMB2_CMD_NEGOTIATE] = SMB2Negotiate
+SMB2._cmdsw[SMB2_CMD_SESSION_SETUP] = SMB2SessionSetup
+SMB2._cmdsw[SMB2_CMD_TREE_CONNECT] = SMB2TreeConnect
+SMB2._cmdsw[SMB2_CMD_CREATE] = SMB2Create
 
 
 def _mod_init():
@@ -174,3 +247,47 @@ def test_smb2_negotiate_roundtrip():
     parsed = SMB2(data)
     assert isinstance(parsed.data, SMB2Negotiate)
     assert parsed.data.dialect_count == 2
+
+
+def test_smb2_session_setup():
+    """Test SMB2 SESSION_SETUP parsing."""
+    ss = SMB2SessionSetup(struct_size=25, security_blob_offset=74)
+    smb2 = SMB2(cmd=SMB2_CMD_SESSION_SETUP, data=ss)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert parsed.cmd == SMB2_CMD_SESSION_SETUP
+    assert isinstance(parsed.data, SMB2SessionSetup)
+    assert parsed.data.struct_size == 25
+
+
+def test_smb2_tree_connect():
+    """Test SMB2 TREE_CONNECT parsing."""
+    from binascii import unhexlify
+    buf = unhexlify(
+        'fe534d4240000000000000000300000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '09000000080000005c005c004900500043002400'
+    )
+    smb2 = SMB2(buf)
+    assert smb2.cmd == SMB2_CMD_TREE_CONNECT
+    assert isinstance(smb2.data, SMB2TreeConnect)
+
+
+def test_smb2_create():
+    """Test SMB2 CREATE parsing."""
+    from binascii import unhexlify
+    buf = unhexlify(
+        'fe534d4240000000000000000500000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '3900000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000066006f00'
+    )
+    smb2 = SMB2(buf)
+    assert smb2.cmd == SMB2_CMD_CREATE
+    assert isinstance(smb2.data, SMB2Create)
