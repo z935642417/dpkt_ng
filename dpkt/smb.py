@@ -125,7 +125,7 @@ class SMB(dpkt.Packet):
                 if next_cmd == 0xFF or andx_off == 0:
                     break
                 offset = offset + andx_off
-            except (dpkt.UnpackError, struct.error):
+            except (dpkt.UnpackError, struct.error, IndexError):
                 break
         self.data = b''
 
@@ -149,6 +149,18 @@ class SMB1Command(dpkt.Packet):
         data_off = bc_off + 2
         self._raw_data = buf[data_off:data_off + self.byte_count]
         self.data = b''
+
+    def __bytes__(self):
+        wc = getattr(self, 'word_count', 0)
+        params = getattr(self, '_params', b'')
+        bc = getattr(self, 'byte_count', None)
+        raw_data = getattr(self, '_raw_data', b'')
+        if bc is None:
+            bc = len(raw_data)
+        return struct.pack('<B', wc) + params + struct.pack('<H', bc) + raw_data
+
+    def __len__(self):
+        return 1 + len(getattr(self, '_params', b'')) + 2 + len(getattr(self, '_raw_data', b''))
 
 
 class SMB1Negotiate(SMB1Command):
@@ -240,11 +252,176 @@ class SMB1Close(SMB1Command):
         SMB1Command.unpack(self, buf)
 
 
-SMB._cmdsw[SMB_CMD_NEGOTIATE] = SMB1Negotiate
-SMB._cmdsw[SMB_CMD_SESSION_SETUP_ANDX] = SMB1SessionSetupAndX
-SMB._cmdsw[SMB_CMD_TREE_CONNECT_ANDX] = SMB1TreeConnectAndX
-SMB._cmdsw[SMB_CMD_NT_CREATE_ANDX] = SMB1NTCreateAndX
-SMB._cmdsw[SMB_CMD_CLOSE] = SMB1Close
+class SMB1ReadAndX(SMB1Command):
+    """SMB1 Read AndX."""
+
+    def __init__(self, *args, **kwargs):
+        self.file_data = b''
+        super(SMB1ReadAndX, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+        if len(self._params) >= 24:
+            self.fid = struct.unpack('<H', self._params[4:6])[0]
+            self.offset = struct.unpack('<I', self._params[6:10])[0]
+            self.max_count = struct.unpack('<H', self._params[10:12])[0]
+        self.file_data = self._raw_data
+        self.data = b''
+
+
+class SMB1WriteAndX(SMB1Command):
+    """SMB1 Write AndX."""
+
+    def __init__(self, *args, **kwargs):
+        self.file_data = b''
+        super(SMB1WriteAndX, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+        if len(self._params) >= 28:
+            self.fid = struct.unpack('<H', self._params[4:6])[0]
+            self.offset = struct.unpack('<I', self._params[6:10])[0]
+            self.timeout = struct.unpack('<I', self._params[10:14])[0]
+            self.write_mode = struct.unpack('<H', self._params[14:16])[0]
+            self.remaining = struct.unpack('<H', self._params[16:18])[0]
+            self.data_length = struct.unpack('<H', self._params[20:22])[0]
+            self.data_offset = struct.unpack('<H', self._params[22:24])[0]
+        self.file_data = self._raw_data
+        self.data = b''
+
+
+class SMB1Open(SMB1Command):
+    """SMB1 Open (legacy)."""
+    pass
+
+
+class SMB1OpenAndX(SMB1Command):
+    """SMB1 Open AndX."""
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+
+
+class SMB1LogoffAndX(SMB1Command):
+    """SMB1 Logoff AndX."""
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 4:
+            self.andx_command = self._params[0]
+            self._andx_rsv = self._params[1]
+            self.andx_offset = struct.unpack('<H', self._params[2:4])[0]
+
+
+class SMB1Echo(SMB1Command):
+    """SMB1 Echo."""
+    pass
+
+
+class SMB1TreeDisconnect(SMB1Command):
+    """SMB1 Tree Disconnect."""
+    pass
+
+
+class SMB1Trans2(SMB1Command):
+    """SMB1 Transaction2."""
+    _subcmdsw = {}
+
+    def __init__(self, *args, **kwargs):
+        self.sub_cmd = None
+        self.param_data = b''
+        super(SMB1Trans2, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 28:
+            self.total_param_count = struct.unpack('<H', self._params[0:2])[0]
+            self.total_data_count = struct.unpack('<H', self._params[2:4])[0]
+            self.max_param_count = struct.unpack('<H', self._params[4:6])[0]
+            self.max_data_count = struct.unpack('<H', self._params[6:8])[0]
+            self.max_setup_count = self._params[8]
+            self._rsv1 = self._params[9]
+            self.flags = struct.unpack('<H', self._params[10:12])[0]
+            self.timeout = struct.unpack('<I', self._params[12:16])[0]
+            self._rsv2 = struct.unpack('<H', self._params[16:18])[0]
+            self.param_count = struct.unpack('<H', self._params[18:20])[0]
+            self.param_offset = struct.unpack('<H', self._params[20:22])[0]
+            self.data_count = struct.unpack('<H', self._params[22:24])[0]
+            self.data_offset = struct.unpack('<H', self._params[24:26])[0]
+            setup_count = self._params[26]
+            self._rsv3 = self._params[27]
+            setup_end = 28 + setup_count * 2
+            if setup_end <= len(self._params):
+                self.setup = self._params[28:setup_end]
+                if setup_count >= 1 and len(self.setup) >= 2:
+                    self.sub_cmd = struct.unpack('<H', self.setup[0:2])[0]
+            if self.param_count and self.param_offset >= 32:
+                param_start = self.param_offset - 32
+                self.param_data = self._raw_data[param_start:param_start + self.param_count] if param_start < len(self._raw_data) else b''
+        self.data = b''
+
+
+class SMB1Trans(SMB1Command):
+    """SMB1 Transaction."""
+    _subcmdsw = {}
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        self.data = b''
+
+
+class SMB1NTTrans(SMB1Command):
+    """SMB1 NT Transaction."""
+    _subcmdsw = {}
+
+    def unpack(self, buf):
+        SMB1Command.unpack(self, buf)
+        if len(self._params) >= 38:
+            self.setup_count = self._params[32] if len(self._params) > 32 else 0
+            if self.setup_count >= 1 and len(self._params) >= 36:
+                self.function_code = struct.unpack('<H', self._params[34:36])[0]
+            else:
+                self.function_code = 0
+        self.data = b''
+
+
+class SMB1NTTransSecondary(SMB1Command):
+    """SMB1 NT Transaction Secondary."""
+    pass
+
+
+def _mod_init():
+    """Post-import hook: populate SMB._cmdsw from SMB_CMD_* constants."""
+    for name, val in list(globals().items()):
+        if name.startswith('SMB_CMD_'):
+            suffix = name[len('SMB_CMD_'):]
+            parts = suffix.split('_')
+            for i, part in enumerate(parts):
+                if part == 'NT':
+                    continue
+                elif part == 'ANDX':
+                    parts[i] = 'AndX'
+                else:
+                    parts[i] = part.capitalize()
+            cls_name = 'SMB1' + ''.join(parts)
+            cmd_cls = globals().get(cls_name)
+            if cmd_cls is not None and isinstance(cmd_cls, type) and issubclass(cmd_cls, SMB1Command):
+                SMB._cmdsw[val] = cmd_cls
+
+
+_mod_init()
 
 
 def test_smb():
@@ -302,3 +479,21 @@ def test_smb1_nt_create_andx():
     parsed = SMB(buf)
     assert len(parsed.commands) == 1
     assert isinstance(parsed.commands[0], SMB1NTCreateAndX)
+
+
+def test_smb1_read_andx():
+    """SMB1 ReadAndX with file data in response."""
+    smb = SMB(cmd=SMB_CMD_READ_ANDX)
+    cmd = SMB1ReadAndX()
+    cmd.word_count = 12
+    cmd._params = b'\xff\x00\x00\x00' + b'\x00' * 20
+    cmd.andx_command = 0xFF
+    cmd._raw_data = b'Hello World'
+    cmd.byte_count = 11
+    cmd.file_data = b'Hello World'
+    smb.data = cmd
+    data = bytes(smb)
+    parsed = SMB(data)
+    assert len(parsed.commands) == 1
+    assert isinstance(parsed.commands[0], SMB1ReadAndX)
+    assert parsed.commands[0].file_data == b'Hello World'
