@@ -40,6 +40,7 @@ from . import ipx
 from . import llc
 from . import loopback
 from . import mrt
+from . import nbss
 from . import netbios
 from . import netflow
 from . import ntp
@@ -65,6 +66,7 @@ from . import sip
 from . import sll
 from . import sll2
 from . import smb
+from . import smb2
 from . import ssl
 from . import stp
 from . import stun
