@@ -71,6 +71,38 @@ class SMB2(dpkt.Packet):
             ('response', 1),
         ),
     }
+    _cmdsw = {}
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        try:
+            cmd_cls = self._cmdsw[self.cmd]
+            self.data = cmd_cls(buf[self.__hdr_len__:])
+            attr_name = self.data.__class__.__name__.lower().replace('smb2', '', 1)
+            setattr(self, attr_name, self.data)
+        except (KeyError, dpkt.UnpackError):
+            self.data = buf[self.__hdr_len__:]
+
+
+class SMB2Negotiate(dpkt.Packet):
+    """SMB2 NEGOTIATE Request/Response."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 36),
+        ('dialect_count', 'H', 0),
+        ('security_mode', 'H', 0),
+        ('_rsv', 'H', 0),
+        ('capabilities', 'I', 0),
+        ('client_guid', '16s', b'\x00' * 16),
+        ('_negotiate_flags', 'I', 0),
+    ]
+
+
+SMB2._cmdsw[SMB2_CMD_NEGOTIATE] = SMB2Negotiate
+
+
+def _mod_init():
+    pass
 
 
 def test_smb2_header():
@@ -119,3 +151,26 @@ def test_smb2_roundtrip():
     assert parsed.pid == 0x1234
     assert parsed.tid == 0x5678
     assert parsed.sid == 0x9ABC
+
+
+def test_smb2_negotiate_request():
+    """Test SMB2 NEGOTIATE request parsing."""
+    from binascii import unhexlify
+    buf = unhexlify(
+        'fe534d424000' + '0000' * 29  # SMB2 header (64 zero bytes, cmd=0)
+        + '2400' + '0500' + '0000' * 6 + '00000000000000000000000000000000'
+    )
+    smb2 = SMB2(buf)
+    assert smb2.cmd == SMB2_CMD_NEGOTIATE
+    assert isinstance(smb2.data, SMB2Negotiate)
+    assert smb2.data.struct_size == 36
+
+
+def test_smb2_negotiate_roundtrip():
+    """Test SMB2 NEGOTIATE construct → bytes → parse."""
+    nego = SMB2Negotiate(dialect_count=2, security_mode=1, capabilities=0x1F)
+    smb2 = SMB2(cmd=SMB2_CMD_NEGOTIATE, data=nego)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Negotiate)
+    assert parsed.data.dialect_count == 2
