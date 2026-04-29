@@ -50,7 +50,7 @@ class SMB2(dpkt.Packet):
         ('_status', 'I', 0),
         ('cmd', 'H', 0),
         ('credit_req', 'H', 0),
-        ('_flags', 'I', 0),
+        ('_flags_val', 'I', 0),
         ('next_cmd', 'I', 0),
         ('mid', 'Q', 0),
         ('pid', 'I', 0),
@@ -59,7 +59,7 @@ class SMB2(dpkt.Packet):
         ('sig', '16s', b'\x00' * 16),
     ]
     __bit_fields__ = {
-        '_flags': (
+        '_flags_val': (
             ('_rsv_hi', 2),
             ('replay', 1),
             ('dfs', 1),
@@ -92,7 +92,7 @@ def test_smb2_flags():
     assert smb2.response == 0
     smb2.response = 1
     assert smb2.response == 1
-    assert (smb2._flags & 1) == 1
+    assert (smb2._flags_val & 1) == 1
     smb2.signed = 1
     assert smb2.signed == 1
     assert smb2.response == 1
