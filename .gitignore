@@ -40,3 +40,6 @@ _build
 .classpath 
 .project
 .pydevproject
+
+# Superpowers brainstorming artifacts
+.superpowers/
