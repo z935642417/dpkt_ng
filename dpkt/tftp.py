@@ -14,6 +14,14 @@ OP_WRQ = 2  # write request
 OP_DATA = 3  # data packet
 OP_ACK = 4  # acknowledgment
 OP_ERR = 5  # error code
+OP_OACK = 6  # option acknowledgment
+
+# RFC 2347 option names
+TFTP_OPT_BLKSIZE = 'blksize'
+TFTP_OPT_TSIZE = 'tsize'
+TFTP_OPT_TIMEOUT = 'timeout'
+TFTP_OPT_MULTICAST = 'multicast'
+TFTP_OPT_WINDOWSIZE = 'windowsize'
 
 # Error codes
 EUNDEF = 0  # not defined
@@ -40,13 +48,33 @@ class TFTP(dpkt.Packet):
 
     __hdr__ = (('opcode', 'H', 1), )
 
+    def __init__(self, *args, **kwargs):
+        self.options = {}
+        super(TFTP, self).__init__(*args, **kwargs)
+
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         if self.opcode in (OP_RRQ, OP_WRQ):
             l_ = self.data.split(b'\x00')
-            self.filename = l_[0]
-            self.mode = l_[1]
+            self.filename = l_[0] if len(l_) > 0 else b''
+            self.mode = l_[1] if len(l_) > 1 else b''
+            self.options = {}
+            for i in range(2, len(l_) - 1, 2):
+                key = l_[i]
+                val = l_[i + 1] if i + 1 < len(l_) else b''
+                if key:
+                    self.options[key] = val
             self.data = b''
+        elif self.opcode == OP_OACK:
+            l_ = self.data.split(b'\x00')
+            if len(l_) > 1:
+                self.options = {}
+                for i in range(0, len(l_) - 1, 2):
+                    key = l_[i]
+                    val = l_[i + 1] if i + 1 < len(l_) else b''
+                    if key:
+                        self.options[key] = val
+                self.data = b''
         elif self.opcode in (OP_DATA, OP_ACK):
             self.block = struct.unpack('>H', self.data[:2])[0]
             self.data = self.data[2:]
@@ -60,7 +88,20 @@ class TFTP(dpkt.Packet):
 
     def __bytes__(self):
         if self.opcode in (OP_RRQ, OP_WRQ):
-            s = self.filename + b'\x00' + self.mode + b'\x00'
+            parts = [self.filename, self.mode]
+            for key, val in self.options.items():
+                parts.append(key)
+                parts.append(val)
+            s = b'\x00'.join(parts) + b'\x00'
+        elif self.opcode == OP_OACK:
+            if self.options:
+                parts = []
+                for key, val in self.options.items():
+                    parts.append(key)
+                    parts.append(val)
+                s = b'\x00'.join(parts) + b'\x00'
+            else:
+                s = b''
         elif self.opcode in (OP_DATA, OP_ACK):
             s = struct.pack('>H', self.block)
         elif self.opcode == OP_ERR:
@@ -68,6 +109,9 @@ class TFTP(dpkt.Packet):
         else:
             s = b''
         return self.pack_hdr() + s + self.data
+
+    def get_option(self, name, default=None):
+        return self.options.get(name, default)
 
 
 def test_op_rrq():
@@ -124,3 +168,36 @@ def test_op_other():
     assert tftp.opcode == 6
     assert bytes(tftp) == buf
     assert tftp.data == unhexlify('abcdef')
+
+
+def test_op_wrq_with_options():
+    """WRQ with blksize and tsize options."""
+    buf = (b'\x00\x02'
+           b'file.bin\x00'
+           b'octet\x00'
+           b'blksize\x00' b'1024\x00'
+           b'tsize\x00' b'0\x00')
+    tftp = TFTP(buf)
+    assert tftp.opcode == OP_WRQ
+    assert tftp.filename == b'file.bin'
+    assert tftp.mode == b'octet'
+    assert tftp.options == {b'blksize': b'1024', b'tsize': b'0'}
+
+
+def test_op_oack():
+    """OACK packet with negotiated options."""
+    buf = (b'\x00\x06'
+           b'blksize\x00' b'1024\x00'
+           b'tsize\x00' b'4096\x00')
+    tftp = TFTP(buf)
+    assert tftp.opcode == OP_OACK
+    assert tftp.options == {b'blksize': b'1024', b'tsize': b'4096'}
+
+
+def test_op_options_get_option():
+    """get_option() helper method."""
+    buf = (b'\x00\x01file.txt\x00octet\x00blksize\x008192\x00')
+    tftp = TFTP(buf)
+    assert tftp.get_option(b'blksize') == b'8192'
+    assert tftp.get_option(b'tsize') is None
+    assert tftp.get_option(b'tsize', b'0') == b'0'
