@@ -321,17 +321,16 @@ class SMB2Write(dpkt.Packet):
             getattr(self, 'channel_info_length', 0))
 
 
-SMB2._cmdsw[SMB2_CMD_NEGOTIATE] = SMB2Negotiate
-SMB2._cmdsw[SMB2_CMD_SESSION_SETUP] = SMB2SessionSetup
-SMB2._cmdsw[SMB2_CMD_TREE_CONNECT] = SMB2TreeConnect
-SMB2._cmdsw[SMB2_CMD_CREATE] = SMB2Create
-SMB2._cmdsw[SMB2_CMD_CLOSE] = SMB2Close
-SMB2._cmdsw[SMB2_CMD_READ] = SMB2Read
-SMB2._cmdsw[SMB2_CMD_WRITE] = SMB2Write
-
-
 def _mod_init():
-    pass
+    for name, val in list(globals().items()):
+        if name.startswith('SMB2_CMD_'):
+            cls_name = 'SMB2' + name[len('SMB2_CMD_'):].title().replace('_', '')
+            cmd_cls = globals().get(cls_name)
+            if cmd_cls is not None and isinstance(cmd_cls, type):
+                SMB2._cmdsw[val] = cmd_cls
+
+
+_mod_init()
 
 
 def test_smb2_header():
@@ -538,3 +537,27 @@ def test_smb2_write_request():
     assert parsed.cmd == SMB2_CMD_WRITE
     assert isinstance(parsed.data, SMB2Write)
     assert parsed.data.file_data == b'Hello World'
+
+
+def test_smb2_unknown_command():
+    """Test unknown command falls back to raw bytes."""
+    from binascii import unhexlify
+    buf = unhexlify(
+        'fe534d424000000000000000ff00000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '00000000deadbeef'
+    )
+    smb2 = SMB2(buf)
+    assert smb2.cmd == 0x00FF
+    assert isinstance(smb2.data, bytes)
+    assert smb2.data == b'\xde\xad\xbe\xef'
+
+
+def test_smb2_mod_init():
+    """Verify _mod_init() populates _cmdsw."""
+    assert SMB2_CMD_NEGOTIATE in SMB2._cmdsw
+    assert SMB2_CMD_READ in SMB2._cmdsw
+    assert SMB2_CMD_WRITE in SMB2._cmdsw
+    assert SMB2_CMD_CLOSE in SMB2._cmdsw
+    assert SMB2._cmdsw[SMB2_CMD_NEGOTIATE] is SMB2Negotiate
