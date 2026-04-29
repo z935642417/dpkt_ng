@@ -3,6 +3,8 @@
 from __future__ import print_function
 from __future__ import absolute_import
 
+import struct
+
 from . import dpkt
 
 # SMB2 Flags
@@ -168,10 +170,94 @@ class SMB2Create(dpkt.Packet):
         self.data = b''
 
 
+class SMB2Close(dpkt.Packet):
+    """SMB2 CLOSE Request."""
+    __byte_order__ = '<'
+    __hdr__ = [
+        ('struct_size', 'H', 24),
+        ('flags', 'H', 0),
+        ('_rsv', 'I', 0),
+        ('file_id', '16s', b'\xff' * 16),
+    ]
+
+
+class SMB2Read(dpkt.Packet):
+    """SMB2 READ Request/Response. Handles both via StructureSize detection."""
+    __byte_order__ = '<'
+
+    def __init__(self, *args, **kwargs):
+        self.file_data = b''
+        super(SMB2Read, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        if len(buf) < 2:
+            raise dpkt.UnpackError('invalid SMB2Read buffer length %d' % len(buf))
+        struct_size = struct.unpack('<H', buf[0:2])[0]
+        if struct_size == 17:
+            self._unpack_response(buf)
+        elif struct_size == 49:
+            self._unpack_request(buf)
+        else:
+            raise dpkt.UnpackError('invalid SMB2Read StructureSize %d' % struct_size)
+
+    def _unpack_response(self, buf):
+        self.struct_size, self.data_offset = struct.unpack('<HB', buf[0:3])
+        self._rsv = buf[3]
+        self.data_length, self.data_remaining = struct.unpack('<II', buf[4:12])
+        self._rsv2 = buf[12:16]
+        start = self.data_offset - 64
+        self.file_data = buf[start:start + self.data_length]
+        self.data = b''
+
+    def _unpack_request(self, buf):
+        self.struct_size = struct.unpack('<H', buf[0:2])[0]
+        self.padding = buf[2]
+        self._flags = buf[3]
+        self.length = struct.unpack('<I', buf[4:8])[0]
+        self.offset = struct.unpack('<Q', buf[8:16])[0]
+        self.file_id = buf[16:32]
+        self.channel = struct.unpack('<I', buf[32:36])[0]
+        self.remaining = struct.unpack('<I', buf[36:40])[0]
+        self.channel_info_offset = struct.unpack('<H', buf[40:42])[0]
+        self.channel_info_length = struct.unpack('<H', buf[42:44])[0]
+        self.flags = struct.unpack('<I', buf[44:48])[0] if len(buf) >= 48 else 0
+        self.data = b''
+
+    def __bytes__(self):
+        if self.file_data:
+            return self._pack_response()
+        return self._pack_request()
+
+    def _pack_response(self):
+        return struct.pack('<HBBII4s',
+            getattr(self, 'struct_size', 17),
+            getattr(self, 'data_offset', 0),
+            getattr(self, '_rsv', 0),
+            getattr(self, 'data_length', len(self.file_data)),
+            getattr(self, 'data_remaining', 0),
+            getattr(self, '_rsv2', b'\x00' * 4)) + self.file_data
+
+    def _pack_request(self):
+        return struct.pack('<HBHIIQ16sIIHHI',
+            getattr(self, 'struct_size', 49),
+            getattr(self, 'padding', 0),
+            getattr(self, '_flags', 0),
+            getattr(self, 'length', 0),
+            getattr(self, 'offset', 0),
+            getattr(self, 'file_id', b'\xff' * 16),
+            getattr(self, 'channel', 0),
+            getattr(self, 'remaining', 0),
+            getattr(self, 'channel_info_offset', 0),
+            getattr(self, 'channel_info_length', 0),
+            getattr(self, 'flags', 0))
+
+
 SMB2._cmdsw[SMB2_CMD_NEGOTIATE] = SMB2Negotiate
 SMB2._cmdsw[SMB2_CMD_SESSION_SETUP] = SMB2SessionSetup
 SMB2._cmdsw[SMB2_CMD_TREE_CONNECT] = SMB2TreeConnect
 SMB2._cmdsw[SMB2_CMD_CREATE] = SMB2Create
+SMB2._cmdsw[SMB2_CMD_CLOSE] = SMB2Close
+SMB2._cmdsw[SMB2_CMD_READ] = SMB2Read
 
 
 def _mod_init():
@@ -291,3 +377,36 @@ def test_smb2_create():
     smb2 = SMB2(buf)
     assert smb2.cmd == SMB2_CMD_CREATE
     assert isinstance(smb2.data, SMB2Create)
+
+
+def test_smb2_close():
+    from binascii import unhexlify
+    buf = unhexlify(
+        'fe534d4240000000000000000600000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000'
+        '18000000ffffffffffffffffffffffffffffffff'
+    )
+    smb2 = SMB2(buf)
+    assert smb2.cmd == SMB2_CMD_CLOSE
+    assert isinstance(smb2.data, SMB2Close)
+
+
+def test_smb2_read_response():
+    """Test SMB2 READ response with file data extraction."""
+    read_resp = SMB2Read()
+    read_resp.struct_size = 17
+    read_resp.data_offset = 80
+    read_resp._rsv = 0
+    read_resp.data_length = 11
+    read_resp.data_remaining = 0
+    read_resp._rsv2 = b'\x00' * 4
+    read_resp.file_data = b'Hello World'
+
+    smb2 = SMB2(cmd=SMB2_CMD_READ, mid=1, data=read_resp)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert parsed.cmd == SMB2_CMD_READ
+    assert isinstance(parsed.data, SMB2Read)
+    assert parsed.data.file_data == b'Hello World'
