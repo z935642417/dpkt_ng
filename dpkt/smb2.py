@@ -135,7 +135,7 @@ class SMB2TreeConnect(dpkt.Packet):
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
-        start = self.path_offset - self.__hdr_len__
+        start = self.path_offset - 64
         self.path = buf[start:start + self.path_length]
         self.data = b''
 
@@ -163,7 +163,7 @@ class SMB2Create(dpkt.Packet):
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
-        start = self.name_offset - self.__hdr_len__
+        start = self.name_offset - 64
         self.file_name = buf[start:start + self.name_length]
         self.data = b''
 
