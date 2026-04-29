@@ -224,7 +224,7 @@ class SMB2Read(dpkt.Packet):
         self.data = b''
 
     def __bytes__(self):
-        if self.file_data:
+        if hasattr(self, 'struct_size') and self.struct_size == 17:
             return self._pack_response()
         return self._pack_request()
 
@@ -238,7 +238,7 @@ class SMB2Read(dpkt.Packet):
             getattr(self, '_rsv2', b'\x00' * 4)) + self.file_data
 
     def _pack_request(self):
-        return struct.pack('<HBHIIQ16sIIHHI',
+        return struct.pack('<HBBIQ16sIIHHI',
             getattr(self, 'struct_size', 49),
             getattr(self, 'padding', 0),
             getattr(self, '_flags', 0),
@@ -410,3 +410,36 @@ def test_smb2_read_response():
     assert parsed.cmd == SMB2_CMD_READ
     assert isinstance(parsed.data, SMB2Read)
     assert parsed.data.file_data == b'Hello World'
+
+
+def test_smb2_read_request_roundtrip():
+    """Test SMB2 READ request construct -> bytes -> parse."""
+    read_req = SMB2Read()
+    read_req.struct_size = 49
+    read_req.padding = 0x50
+    read_req._flags = 0
+    read_req.length = 4096
+    read_req.offset = 0
+    read_req.file_id = b'\xff' * 16
+    read_req.channel = 0
+    read_req.remaining = 0
+    read_req.channel_info_offset = 0
+    read_req.channel_info_length = 0
+    read_req.flags = 0
+
+    smb2 = SMB2(cmd=SMB2_CMD_READ, mid=1, data=read_req)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Read)
+    assert parsed.data.struct_size == 49
+    assert parsed.data.length == 4096
+
+
+def test_smb2_close_roundtrip():
+    """Test SMB2 CLOSE construct -> bytes -> parse."""
+    close = SMB2Close(flags=1, file_id=b'\x01' * 16)
+    smb2 = SMB2(cmd=SMB2_CMD_CLOSE, mid=1, data=close)
+    data = bytes(smb2)
+    parsed = SMB2(data)
+    assert isinstance(parsed.data, SMB2Close)
+    assert parsed.data.flags == 1
