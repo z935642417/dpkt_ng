@@ -43,3 +43,6 @@ _build
 
 # Superpowers brainstorming artifacts
 .superpowers/
+
+# Git worktrees
+.worktrees/
