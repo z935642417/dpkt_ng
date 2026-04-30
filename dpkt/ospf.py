@@ -238,6 +238,125 @@ class LSAv2Header(dpkt.Packet):
     )
 
 
+class LSARouter(LSAv2Header):
+    """OSPFv2 Router-LSA."""
+    def __init__(self, *args, **kwargs):
+        self.links = []
+        super(LSARouter, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        flags, rsv, link_count = struct.unpack('>BBH', self.data[:4])
+        self.flags = flags
+        self.links = []
+        off = 4
+        for _ in range(link_count):
+            if off + 12 > len(self.data):
+                break
+            link = struct.unpack('>IIBBH', self.data[off:off + 12])
+            self.links.append({'id': link[0], 'data': link[1], 'type': link[2],
+                               'tos': link[3], 'metric': link[4]})
+            off += 12
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>BBH', self.flags, 0, len(self.links))
+        for link in self.links:
+            body += struct.pack('>IIBBH', link['id'], link['data'],
+                               link['type'], link['tos'], link['metric'])
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 + 12 * len(self.links)
+
+
+class LSANetwork(LSAv2Header):
+    """OSPFv2 Network-LSA."""
+    def __init__(self, *args, **kwargs):
+        self.routers = []
+        super(LSANetwork, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.mask = struct.unpack('>I', self.data[:4])[0]
+        self.routers = []
+        off = 4
+        while off + 4 <= len(self.data):
+            self.routers.append(struct.unpack('>I', self.data[off:off + 4])[0])
+            off += 4
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>I', self.mask)
+        for r in self.routers:
+            body += struct.pack('>I', r)
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 + 4 * len(self.routers)
+
+
+class LSASummaryIP(LSAv2Header):
+    """OSPFv2 Summary-IP (type 3) LSA."""
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.mask = struct.unpack('>I', self.data[:4])[0]
+        metric = self.data[4:7] + b'\x00'
+        self.metric = struct.unpack('>I', metric)[0] >> 8
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>I', self.mask) + struct.pack('>I', self.metric << 8)[:3]
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 7
+
+
+class LSASummaryASBR(LSASummaryIP):
+    """OSPFv2 ASBR-Summary (type 4) LSA."""
+    pass
+
+
+class LSAASExternal(LSASummaryIP):
+    """OSPFv2 AS-External (type 5) LSA."""
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.mask = struct.unpack('>I', self.data[:4])[0]
+        self.flags = self.data[4]
+        metric = self.data[5:8] + b'\x00'
+        self.metric = struct.unpack('>I', metric)[0] >> 8
+        if len(self.data) >= 16:
+            self.forwarding = struct.unpack('>I', self.data[8:12])[0]
+            self.tag = struct.unpack('>I', self.data[12:16])[0]
+        else:
+            self.forwarding = 0
+            self.tag = 0
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>I', self.mask) + bytes([self.flags])
+        body += struct.pack('>I', self.metric << 8)[:3]
+        body += struct.pack('>II', self.forwarding, self.tag)
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 16
+
+
+# Register v2 LSA types
+OSPFv2LSU._lsa_sw.update({
+    LSAv2_ROUTER: LSARouter,
+    LSAv2_NETWORK: LSANetwork,
+    LSAv2_SUMMARY_IP: LSASummaryIP,
+    LSAv2_SUMMARY_ASBR: LSASummaryASBR,
+    LSAv2_AS_EXTERNAL: LSAASExternal,
+})
+
 # Register v2 message types
 OSPFv2._msg_sw.update({
     OSPF_MSG_HELLO: OSPFv2Hello,
@@ -300,3 +419,14 @@ def test_ospf_v2_lsu_with_lsa():
     assert isinstance(parsed.data, OSPFv2LSU)
     assert len(parsed.lsu.lsas) == 1
     assert parsed.lsu.lsas[0].type == LSAv2_ROUTER
+
+def test_ospf_v2_router_lsa():
+    """Router-LSA with link list roundtrip."""
+    lsa = LSARouter(type=LSAv2_ROUTER, id=0x0a000001, adv_router=0x0a000001,
+                    flags=0, links=[{'id': 0x0a000002, 'data': 0x0a000002,
+                                     'type': 2, 'tos': 0, 'metric': 10}])
+    data = bytes(lsa)
+    parsed = LSARouter(data)
+    assert len(parsed.links) == 1
+    assert parsed.links[0]['metric'] == 10
+    assert parsed.links[0]['type'] == 2
