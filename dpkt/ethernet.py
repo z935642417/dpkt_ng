@@ -48,6 +48,7 @@ ETH_TYPE_PPPoE = 0x8864  # PPP Over Ethernet Session Stage
 ETH_TYPE_LLDP = 0x88CC  # Link Layer Discovery Protocol
 ETH_TYPE_TEB = 0x6558  # Transparent Ethernet Bridging
 ETH_TYPE_PROFINET = 0x8892  # PROFINET protocol
+ETH_TYPE_ISIS = 0x22F0  # IS-IS direct encapsulation
 
 # all QinQ types for fast checking
 _ETH_TYPES_QINQ = frozenset([ETH_TYPE_8021Q, ETH_TYPE_8021AD, ETH_TYPE_QINQ1, ETH_TYPE_QINQ2])

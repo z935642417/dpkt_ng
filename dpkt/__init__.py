@@ -38,6 +38,7 @@ from . import ieee80211
 from . import igmp
 from . import ip
 from . import ip6
+from . import isis
 from . import ipx
 from . import llc
 from . import loopback

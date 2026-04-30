@@ -50,6 +50,9 @@ class LLC(dpkt.Packet):
                 self.data = self.ipx = Ethernet.get_type(ETH_TYPE_IPX)(self.data)
             elif self.dsap == 0x42:  # SAP_STP
                 self.data = self.stp = stp.STP(self.data)
+            elif self.dsap == 0xfe:  # OSI IS-IS
+                from .isis import ISIS
+                self.data = self.isis = ISIS(self.data)
 
     def pack_hdr(self):
         buf = dpkt.Packet.pack_hdr(self)
