@@ -215,7 +215,79 @@ class EIGRP(dpkt.Packet):
         cls = self._opcode_sw.get(self.opcode)
         if cls:
             self.data = cls(self.data)
-            setattr(self, self.data.__class__.__name__.lower(), self.data)
+            setattr(self, getattr(self.data, '_msg_name', self.data.__class__.__name__).lower(), self.data)
+
+
+class _EIGRPMessageMixin(object):
+    def __bytes__(self):
+        return self._buf
+
+    def _parse_tlvs(self, buf):
+        tlvs = []
+        off = 0
+        while off + 4 <= len(buf):
+            tlv_type, tlv_len = struct.unpack('>HH', buf[off:off+4])
+            if tlv_len < 4 or off + tlv_len > len(buf):
+                break
+            cls = EIGRP._tlv_sw.get(tlv_type, EIGRPGenericTLV)
+            tlvs.append(cls(buf[off:off+tlv_len]))
+            off += tlv_len
+        return tlvs
+
+
+class EIGRPHello(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'Hello'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+class EIGRPUpdate(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'Update'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+class EIGRPQuery(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'Query'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+class EIGRPReply(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'Reply'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+class EIGRPSIAQuery(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'SIAQuery'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+class EIGRPSIAReply(_EIGRPMessageMixin, dpkt.Packet):
+    _msg_name = 'SIAReply'
+    def unpack(self, buf):
+        self._buf = buf
+        self.tlvs = self._parse_tlvs(buf)
+        self.data = b''
+
+
+EIGRP._opcode_sw.update({
+    EIGRP_OP_HELLO: EIGRPHello, EIGRP_OP_UPDATE: EIGRPUpdate,
+    EIGRP_OP_QUERY: EIGRPQuery, EIGRP_OP_REPLY: EIGRPReply,
+    EIGRP_OP_SIAQUERY: EIGRPSIAQuery, EIGRP_OP_SIAREPLY: EIGRPSIAReply,
+})
 
 
 def test_eigrp_header():
@@ -260,3 +332,35 @@ def test_eigrp_external_route():
     parsed = EIGRPExternalRouteTLV(data)
     assert parsed.origin_router == 0x0a0000fe
     assert parsed.tag == 100
+
+
+def test_eigrp_hello_with_param():
+    param = EIGRPParamTLV(k1=1, k3=1, hold_time=15)
+    param_bytes = bytes(param)
+    hello_body = param_bytes
+    buf = struct.pack('>BBHIIII', 2, EIGRP_OP_HELLO, 0, 0, 1, 0, 100) + hello_body
+    pkt = EIGRP(buf)
+    assert isinstance(pkt.data, EIGRPHello)
+    assert len(pkt.hello.tlvs) == 1
+    assert isinstance(pkt.hello.tlvs[0], EIGRPParamTLV)
+
+
+def test_eigrp_ipv6_route():
+    tlv = EIGRPInternalRouteTLV()
+    tlv.next_hop = 0; tlv.prefix_length = 64
+    tlv.prefix = b'\x20\x01\x0d\xb8\x00\x00\x00\x00'
+    data = bytes(tlv)
+    parsed = EIGRPInternalRouteTLV(data)
+    assert parsed.prefix_length == 64
+    assert parsed.prefix == b'\x20\x01\x0d\xb8\x00\x00\x00\x00'
+
+
+def test_eigrp_roundtrip():
+    param = EIGRPParamTLV(k1=1, k3=1, hold_time=15)
+    param_bytes = bytes(param)
+    pkt = EIGRP(v=2, opcode=EIGRP_OP_HELLO, seq=1, asn=100, data=param_bytes)
+    data = bytes(pkt)
+    parsed = EIGRP(data)
+    assert isinstance(parsed.data, EIGRPHello)
+    assert len(parsed.hello.tlvs) == 1
+    assert parsed.hello.tlvs[0].hold_time == 15
