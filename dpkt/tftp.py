@@ -50,6 +50,7 @@ class TFTP(dpkt.Packet):
 
     def __init__(self, *args, **kwargs):
         self.options = {}
+        self.strict = False
         super(TFTP, self).__init__(*args, **kwargs)
 
     def unpack(self, buf):
@@ -62,8 +63,18 @@ class TFTP(dpkt.Packet):
             for i in range(2, len(l_) - 1, 2):
                 key = l_[i]
                 val = l_[i + 1] if i + 1 < len(l_) else b''
-                if key:
-                    self.options[key] = val
+                if not key:
+                    if self.strict:
+                        raise dpkt.UnpackError('empty option key in TFTP')
+                    continue
+                self.options[key] = val
+            # Check for orphaned last key in lenient mode
+            if len(l_) > 2 and (len(l_) - 2) % 2 == 1:
+                last_key = l_[-1]
+                if last_key and last_key not in self.options:
+                    if self.strict:
+                        raise dpkt.UnpackError('missing option value in TFTP')
+                    self.options[last_key] = b''
             self.data = b''
         elif self.opcode == OP_OACK:
             l_ = self.data.split(b'\x00')
@@ -82,6 +93,16 @@ class TFTP(dpkt.Packet):
             self.errcode = struct.unpack('>H', self.data[:2])[0]
             self.errmsg = self.data[2:].split(b'\x00')[0]
             self.data = b''
+
+    def __repr__(self):
+        op_names = {OP_RRQ: 'RRQ', OP_WRQ: 'WRQ', OP_DATA: 'DATA',
+                    OP_ACK: 'ACK', OP_ERR: 'ERR', OP_OACK: 'OACK'}
+        parts = [op_names.get(self.opcode, 'OP(%d)' % self.opcode)]
+        if hasattr(self, 'filename') and self.filename:
+            parts.append('file=%s' % self.filename)
+        if self.options:
+            parts.append('opts=%s' % self.options)
+        return 'TFTP(' + ', '.join(parts) + ')'
 
     def __len__(self):
         return len(bytes(self))
@@ -201,3 +222,44 @@ def test_op_options_get_option():
     assert tftp.get_option(b'blksize') == b'8192'
     assert tftp.get_option(b'tsize') is None
     assert tftp.get_option(b'tsize', b'0') == b'0'
+
+
+def test_tftp_roundtrip_options():
+    """Construct TFTP with options → bytes → parse → verify."""
+    tftp = TFTP(opcode=OP_WRQ, filename=b'upload.bin', mode=b'octet',
+                options={b'blksize': b'4096', b'timeout': b'10'})
+    data = bytes(tftp)
+    parsed = TFTP(data)
+    assert parsed.opcode == OP_WRQ
+    assert parsed.filename == b'upload.bin'
+    assert parsed.get_option(b'blksize') == b'4096'
+    assert parsed.get_option(b'timeout') == b'10'
+
+
+def test_lenient_missing_null():
+    """Lenient mode: accept truncated option without final null."""
+    buf = (b'\x00\x01file.txt\x00octet\x00blksize\x001024')
+    tftp = TFTP(buf)
+    assert tftp.filename == b'file.txt'
+    assert tftp.options == {b'blksize': b'1024'}
+
+
+def test_strict_missing_null():
+    """Strict mode: raise UnpackError on malformed packet."""
+    buf = (b'\x00\x01file.txt\x00octet\x00blksize')
+    tftp = TFTP()
+    tftp.strict = True
+    try:
+        tftp.unpack(buf)
+        assert False, "should have raised"
+    except dpkt.UnpackError:
+        pass
+
+
+def test_tftp_repr():
+    """__repr__ shows opcode name, filename, options."""
+    buf = (b'\x00\x01file.txt\x00octet\x00blksize\x001024\x00')
+    tftp = TFTP(buf)
+    r = repr(tftp)
+    assert 'RRQ' in r
+    assert 'file.txt' in r
