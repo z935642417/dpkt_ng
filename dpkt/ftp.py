@@ -252,3 +252,31 @@ def test_ftp_data_repr():
     parser = FTPDataParser(b'hello', mode='binary')
     assert 'binary' in repr(parser)
     assert 'size=5' in repr(parser)
+
+
+def test_ftp_end_to_end():
+    """Full FTP session: login → data transfer."""
+    parser = FTPControlParser()
+    session = (
+        b'220 FTP server ready\r\n'
+        b'USER alice\r\n'
+        b'331 Password required\r\n'
+        b'PASS secret\r\n'
+        b'230 Logged in\r\n'
+        b'PASV\r\n'
+        b'227 Entering Passive (10,0,0,1,19,137)\r\n'
+        b'RETR readme.txt\r\n'
+        b'150 Opening data\r\n'
+        b'226 Transfer complete\r\n'
+        b'QUIT\r\n'
+        b'221 Goodbye\r\n'
+    )
+    parser.feed(session)
+    assert len(parser.get_commands()) == 5
+    assert len(parser.get_replies()) == 7
+    assert parser.get_reply_by_code(230) is not None
+    assert parser.get_reply_by_code(227) is not None
+
+    # Verify data channel works independently
+    data_parser = FTPDataParser(b'Hello World', mode='binary')
+    assert data_parser.file_data == b'Hello World'
