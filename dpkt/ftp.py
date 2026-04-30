@@ -80,6 +80,80 @@ class FTPReply(object):
         return b''.join(result)
 
 
+class FTPControlParser(object):
+    """Parse FTP control channel byte stream into commands and replies."""
+    def __init__(self):
+        self.commands = []
+        self.replies = []
+        self._buffer = b''
+        self._pending_reply_lines = []
+
+    def feed(self, data):
+        """Feed raw bytes (from reassembled TCP stream)."""
+        self._buffer += data
+        self._process_buffer()
+
+    def _process_buffer(self):
+        while b'\r\n' in self._buffer:
+            idx = self._buffer.index(b'\r\n') + 2
+            line = self._buffer[:idx]
+            self._buffer = self._buffer[idx:]
+            self._dispatch_line(line)
+
+    def _dispatch_line(self, line):
+        stripped = line.rstrip(b'\r\n')
+        if not stripped:
+            return
+        if len(stripped) >= 3 and stripped[:3].isdigit():
+            self._pending_reply_lines.append(line)
+            if len(stripped) > 3 and stripped[3:4] == b' ':
+                reply = FTPReply(list(self._pending_reply_lines))
+                self.replies.append(reply)
+                self._pending_reply_lines = []
+            elif len(stripped) == 3 or (len(stripped) > 3 and stripped[3:4] != b'-'):
+                reply = FTPReply(self._pending_reply_lines)
+                self.replies.append(reply)
+                self._pending_reply_lines = []
+        else:
+            cmd = FTPCommand(line)
+            self.commands.append(cmd)
+
+    def get_commands(self):
+        return self.commands
+
+    def get_replies(self):
+        return self.replies
+
+    def get_reply_by_code(self, code):
+        for r in self.replies:
+            if r.code == code:
+                return r
+        return None
+
+
+class FTPDataParser(object):
+    """Parse FTP data channel byte stream."""
+    def __init__(self, data, mode='binary'):
+        self.data = data
+        self.mode = mode
+        self.file_data = b''
+        self._parse()
+
+    def _parse(self):
+        if self.mode == 'ascii':
+            self.file_data = self.data.replace(b'\r\n', b'\n')
+            if self.file_data.endswith(b'\n'):
+                self.file_data = self.file_data[:-1]
+        else:
+            self.file_data = self.data
+
+    def __repr__(self):
+        return "FTPDataParser(mode=%s, size=%d)" % (self.mode, len(self.file_data))
+
+    def __bytes__(self):
+        return self.data
+
+
 def test_ftp_command():
     """Parse FTP USER command."""
     cmd = FTPCommand(b'USER anonymous\r\n')
@@ -127,3 +201,54 @@ def test_ftp_reply_predicates():
     assert not r.is_positive_intermediate()
     r2 = FTPReply([b'500 Error\r\n'])
     assert r2.is_permanent_negative()
+
+def test_ftp_control_parser_commands():
+    """Parse multiple commands from stream."""
+    parser = FTPControlParser()
+    parser.feed(b'USER alice\r\nPASS secret\r\n')
+    cmds = parser.get_commands()
+    assert len(cmds) == 2
+    assert cmds[0].verb == b'USER'
+    assert cmds[1].verb == b'PASS'
+
+def test_ftp_control_parser_replies():
+    """Parse multi-line reply from stream."""
+    parser = FTPControlParser()
+    parser.feed(b'220-Welcome\r\n220-Please\r\n220 End\r\n')
+    replies = parser.get_replies()
+    assert len(replies) == 1
+    assert replies[0].code == 220
+    assert replies[0].is_multi_line
+
+def test_ftp_control_parser_mixed():
+    """Parse interleaved commands and replies."""
+    parser = FTPControlParser()
+    parser.feed(b'USER alice\r\n331 Password\r\nPASS secret\r\n230 Logged in\r\n')
+    assert len(parser.get_commands()) == 2
+    assert len(parser.get_replies()) == 2
+    assert parser.get_reply_by_code(230) is not None
+    assert parser.get_reply_by_code(999) is None
+
+def test_ftp_control_parser_incremental():
+    """Feed data incrementally (simulating TCP segments)."""
+    parser = FTPControlParser()
+    parser.feed(b'USER ali')
+    assert len(parser.get_commands()) == 0
+    parser.feed(b'ce\r\nPASS secret\r\n')
+    assert len(parser.get_commands()) == 2
+
+def test_ftp_data_binary():
+    """Binary data pass-through."""
+    data = b'\x89PNG\r\n\x1a\n\x00'
+    parser = FTPDataParser(data, mode='binary')
+    assert parser.file_data == data
+
+def test_ftp_data_ascii():
+    """ASCII mode: CRLF→LF conversion."""
+    parser = FTPDataParser(b'line1\r\nline2\r\n', mode='ascii')
+    assert parser.file_data == b'line1\nline2'
+
+def test_ftp_data_repr():
+    parser = FTPDataParser(b'hello', mode='binary')
+    assert 'binary' in repr(parser)
+    assert 'size=5' in repr(parser)
