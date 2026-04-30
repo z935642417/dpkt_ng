@@ -70,11 +70,182 @@ class OSPF(dpkt.Packet):
 
 
 class OSPFv2(OSPF):
-    pass
+    __hdr__ = OSPF.__hdr__ + (
+        ('atype', 'H', AUTH_NONE),
+        ('auth', '8s', b''),
+    )
+    _msg_sw = {}
+
+    def __init__(self, *args, **kwargs):
+        super(OSPFv2, self).__init__(*args, **kwargs)
+        if not args:
+            self.v = OSPF_VERSION_2
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        cls = self._msg_sw.get(self.type)
+        if cls and self.data:
+            self.data = cls(self.data)
+            setattr(self, self.data.__class__.__name__.split('v2', 1)[-1].lower(), self.data)
 
 
 class OSPFv3(OSPF):
     pass
+
+
+class OSPFv2Hello(dpkt.Packet):
+    """OSPFv2 Hello packet."""
+    __hdr__ = (
+        ('mask', 'I', 0),
+        ('hello_interval', 'H', 10),
+        ('opts', 'B', 0),
+        ('router_priority', 'B', 0),
+        ('dead_interval', 'I', 40),
+        ('designated_router', 'I', 0),
+        ('backup_designated_router', 'I', 0),
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.neighbors = []
+        super(OSPFv2Hello, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.neighbors = []
+        off = self.__hdr_len__
+        while off + 4 <= len(buf):
+            self.neighbors.append(struct.unpack('>I', buf[off:off + 4])[0])
+            off += 4
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        for n in self.neighbors:
+            hdr += struct.pack('>I', n)
+        return hdr
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 * len(self.neighbors)
+
+
+class OSPFv2DBD(dpkt.Packet):
+    """OSPFv2 Database Description packet."""
+    __hdr__ = (
+        ('mtu', 'H', 0),
+        ('opts', 'B', 0),
+        ('flags', 'B', 0),
+        ('seq', 'I', 0),
+    )
+
+
+class OSPFv2LSR(dpkt.Packet):
+    """OSPFv2 Link State Request."""
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+        super(OSPFv2LSR, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.requests = []
+        off = 0
+        while off + 12 <= len(buf):
+            ls_type = struct.unpack('>I', buf[off:off + 4])[0]
+            ls_id = struct.unpack('>I', buf[off + 4:off + 8])[0]
+            adv_router = struct.unpack('>I', buf[off + 8:off + 12])[0]
+            self.requests.append({'type': ls_type, 'id': ls_id, 'adv_router': adv_router})
+            off += 12
+        self.data = b''
+
+    def __bytes__(self):
+        result = b''
+        for r in self.requests:
+            result += struct.pack('>III', r['type'], r['id'], r['adv_router'])
+        return result
+
+    def __len__(self):
+        return 12 * len(self.requests)
+
+
+class OSPFv2LSU(dpkt.Packet):
+    """OSPFv2 Link State Update."""
+    _lsa_sw = {}
+
+    def __init__(self, *args, **kwargs):
+        self.lsas = []
+        super(OSPFv2LSU, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.lsa_count = struct.unpack('>I', buf[:4])[0]
+        off = 4
+        self.lsas = []
+        for _ in range(self.lsa_count):
+            if off + 20 > len(buf):
+                break
+            lsa_len = struct.unpack('>H', buf[off + 18:off + 20])[0]
+            lsa_buf = buf[off:off + lsa_len]
+            lsa_type = struct.unpack('>B', lsa_buf[2:3])[0]
+            cls = self._lsa_sw.get(lsa_type, LSAv2Header)
+            try:
+                lsa = cls(lsa_buf)
+            except (dpkt.UnpackError, struct.error):
+                lsa = LSAv2Header(lsa_buf)
+            self.lsas.append(lsa)
+            off += lsa_len
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = struct.pack('>I', len(self.lsas))
+        for lsa in self.lsas:
+            hdr += bytes(lsa)
+        return hdr
+
+    def __len__(self):
+        return 4 + sum(len(bytes(lsa)) for lsa in self.lsas)
+
+
+class OSPFv2LSAck(dpkt.Packet):
+    """OSPFv2 Link State Acknowledgment."""
+    def __init__(self, *args, **kwargs):
+        self.lsa_headers = []
+        super(OSPFv2LSAck, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.lsa_headers = []
+        off = 0
+        while off + 20 <= len(buf):
+            lsa = LSAv2Header(buf[off:off + 20])
+            self.lsa_headers.append(lsa)
+            off += 20
+        self.data = b''
+
+    def __bytes__(self):
+        return b''.join(bytes(h) for h in self.lsa_headers)
+
+    def __len__(self):
+        return 20 * len(self.lsa_headers)
+
+
+class LSAv2Header(dpkt.Packet):
+    """OSPFv2 LSA common header (20 bytes)."""
+    __hdr__ = (
+        ('age', 'H', 0),
+        ('opts', 'B', 0),
+        ('type', 'B', 0),
+        ('id', 'I', 0),
+        ('adv_router', 'I', 0),
+        ('seq', 'I', 0),
+        ('sum', 'H', 0),
+        ('len', 'H', 20),
+    )
+
+
+# Register v2 message types
+OSPFv2._msg_sw.update({
+    OSPF_MSG_HELLO: OSPFv2Hello,
+    OSPF_MSG_DBD: OSPFv2DBD,
+    OSPF_MSG_LSR: OSPFv2LSR,
+    OSPF_MSG_LSU: OSPFv2LSU,
+    OSPF_MSG_LSACK: OSPFv2LSAck,
+})
 
 
 def test_ospf_base():
@@ -90,7 +261,7 @@ def test_ospf_base():
 
 def test_ospf_factory_v2():
     """OSPF(buf) with v=2 returns OSPFv2 instance."""
-    buf = b'\x02\x01\x00\x1c\xc0\xa8\x01\x01\x00\x00\x00\x01\x00\x00\x00\x00'
+    buf = b'\x02\x01\x00\x18\xc0\xa8\x01\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     pkt = OSPF(buf)
     assert isinstance(pkt, OSPFv2)
     assert pkt.v == 2
@@ -101,3 +272,31 @@ def test_ospf_factory_v3():
     pkt = OSPF(buf)
     assert isinstance(pkt, OSPFv3)
     assert pkt.v == 3
+
+def test_ospf_v2_hello():
+    """OSPFv2 Hello with mask, interval, neighbors roundtrip."""
+    hello = OSPFv2Hello(mask=0xffffff00, hello_interval=10, router_priority=1,
+                        designated_router=0x0a000001,
+                        neighbors=[0x0a000002, 0x0a000003])
+    ospf = OSPFv2(type=OSPF_MSG_HELLO, router=0x0a000001, area=0, data=hello)
+    data = bytes(ospf)
+    assert data[0:1] == b'\x02'
+    assert data[1:2] == b'\x01'
+    parsed = OSPF(data)
+    assert isinstance(parsed, OSPFv2)
+    assert isinstance(parsed.data, OSPFv2Hello)
+    assert parsed.hello.mask == 0xffffff00
+    assert len(parsed.hello.neighbors) == 2
+
+def test_ospf_v2_lsu_with_lsa():
+    """OSPFv2 LSU containing LSA header."""
+    router_lsa = LSAv2Header(type=LSAv2_ROUTER, id=0x0a000001,
+                             adv_router=0x0a000001, seq=0x80000001, len=20)
+    lsu = OSPFv2LSU(lsas=[router_lsa])
+    ospf = OSPFv2(type=OSPF_MSG_LSU, router=0x0a000001, area=0, data=lsu)
+    data = bytes(ospf)
+    parsed = OSPF(data)
+    assert isinstance(parsed, OSPFv2)
+    assert isinstance(parsed.data, OSPFv2LSU)
+    assert len(parsed.lsu.lsas) == 1
+    assert parsed.lsu.lsas[0].type == LSAv2_ROUTER
