@@ -90,6 +90,370 @@ class OSPFv2(OSPF):
 
 
 class OSPFv3(OSPF):
+    __hdr__ = OSPF.__hdr__ + (
+        ('instance_id', 'B', 0),
+        ('rsvd', 'B', 0),
+    )
+    _msg_sw = {}
+
+    def __init__(self, *args, **kwargs):
+        super(OSPFv3, self).__init__(*args, **kwargs)
+        if not args:
+            self.v = OSPF_VERSION_3
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        cls = self._msg_sw.get(self.type)
+        if cls and self.data:
+            self.data = cls(self.data)
+            setattr(self, self.data.__class__.__name__.lower(), self.data)
+
+
+class OSPFv3Hello(dpkt.Packet):
+    """OSPFv3 Hello packet."""
+    __hdr__ = (
+        ('interface_id', 'I', 0),
+        ('router_priority', 'B', 0),
+        ('opts', '3s', b'\x00' * 3),
+        ('hello_interval', 'H', 10),
+        ('dead_interval', 'H', 40),
+        ('designated_router', 'I', 0),
+        ('backup_designated_router', 'I', 0),
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.neighbors = []
+        super(OSPFv3Hello, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.neighbors = []
+        off = self.__hdr_len__
+        while off + 4 <= len(buf):
+            self.neighbors.append(struct.unpack('>I', buf[off:off + 4])[0])
+            off += 4
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        for n in self.neighbors:
+            hdr += struct.pack('>I', n)
+        return hdr
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 * len(self.neighbors)
+
+
+class OSPFv3DBD(dpkt.Packet):
+    __hdr__ = (('opts', '3s', b'\x00' * 3), ('flags', 'B', 0), ('seq', 'I', 0))
+
+
+class OSPFv3LSR(dpkt.Packet):
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+        super(OSPFv3LSR, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.requests = []
+        off = 0
+        while off + 10 <= len(buf):
+            ls_type = struct.unpack('>H', buf[off:off + 2])[0]
+            ls_id = struct.unpack('>I', buf[off + 2:off + 6])[0]
+            adv_router = struct.unpack('>I', buf[off + 6:off + 10])[0]
+            self.requests.append({'type': ls_type, 'id': ls_id, 'adv_router': adv_router})
+            off += 10
+        self.data = b''
+
+    def __bytes__(self):
+        result = b''
+        for r in self.requests:
+            result += struct.pack('>HII', r['type'], r['id'], r['adv_router'])
+        return result
+
+    def __len__(self):
+        return 10 * len(self.requests)
+
+
+class OSPFv3LSU(dpkt.Packet):
+    _lsa_sw = {}
+
+    def __init__(self, *args, **kwargs):
+        self.lsas = []
+        super(OSPFv3LSU, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.lsa_count = struct.unpack('>I', buf[:4])[0]
+        off = 4
+        self.lsas = []
+        for _ in range(self.lsa_count):
+            if off + 20 > len(buf):
+                break
+            lsa_len = struct.unpack('>H', buf[off + 18:off + 20])[0]
+            lsa_buf = buf[off:off + lsa_len]
+            lsa_type = struct.unpack('>H', lsa_buf[2:4])[0]
+            cls = self._lsa_sw.get(lsa_type, LSAv3Header)
+            try:
+                lsa = cls(lsa_buf)
+            except (dpkt.UnpackError, struct.error):
+                lsa = LSAv3Header(lsa_buf)
+            self.lsas.append(lsa)
+            off += lsa_len
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = struct.pack('>I', len(self.lsas))
+        for lsa in self.lsas:
+            hdr += bytes(lsa)
+        return hdr
+
+    def __len__(self):
+        return 4 + sum(len(bytes(lsa)) for lsa in self.lsas)
+
+
+class OSPFv3LSAck(dpkt.Packet):
+    def __init__(self, *args, **kwargs):
+        self.lsa_headers = []
+        super(OSPFv3LSAck, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        self.lsa_headers = []
+        off = 0
+        while off + 20 <= len(buf):
+            self.lsa_headers.append(LSAv3Header(buf[off:off + 20]))
+            off += 20
+        self.data = b''
+
+    def __bytes__(self):
+        return b''.join(bytes(h) for h in self.lsa_headers)
+
+    def __len__(self):
+        return 20 * len(self.lsa_headers)
+
+
+class LSAv3Header(dpkt.Packet):
+    __hdr__ = (
+        ('age', 'H', 0), ('_type_field', 'H', 0), ('id', 'I', 0),
+        ('adv_router', 'I', 0), ('seq', 'I', 0), ('sum', 'H', 0), ('len', 'H', 20),
+    )
+
+    @property
+    def ls_type(self):
+        return self._type_field
+
+    @ls_type.setter
+    def ls_type(self, v):
+        self._type_field = v
+
+
+class LSARouterV3(LSAv3Header):
+    def __init__(self, *args, **kwargs):
+        self.links = []
+        super(LSARouterV3, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.flags = self.data[0]
+        self.opts = self.data[1:4]
+        self.links = []
+        off = 4
+        while off + 16 <= len(self.data):
+            link = struct.unpack('>BBHIII', self.data[off:off + 16])
+            self.links.append({
+                'type': link[0], 'rsv': link[1], 'metric': link[2],
+                'interface_id': link[3], 'neighbor_interface_id': link[4],
+                'neighbor_router': link[5],
+            })
+            off += 16
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = bytes([self.flags, 0, 0, 0])
+        for link in self.links:
+            body += struct.pack('>BBHIII', link['type'], link['rsv'], link['metric'],
+                                link['interface_id'], link['neighbor_interface_id'],
+                                link['neighbor_router'])
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 + 16 * len(self.links)
+
+
+class LSANetworkV3(LSAv3Header):
+    def __init__(self, *args, **kwargs):
+        self.routers = []
+        super(LSANetworkV3, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.opts = self.data[0:3]
+        self.routers = []
+        off = 4
+        while off + 4 <= len(self.data):
+            self.routers.append(struct.unpack('>I', self.data[off:off + 4])[0])
+            off += 4
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = self.opts + b'\x00'
+        for r in self.routers:
+            body += struct.pack('>I', r)
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 + 4 * len(self.routers)
+
+
+class LSAInterAreaPrefix(LSAv3Header):
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.metric = struct.unpack('>I', self.data[0:3] + b'\x00')[0] >> 8
+        self.prefix_length = self.data[3]
+        prefix_bytes = (self.prefix_length + 7) // 8
+        self.prefix = self.data[4:4 + prefix_bytes]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>I', self.metric << 8)[:3] + bytes([self.prefix_length]) + self.prefix
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 4 + len(self.prefix)
+
+
+class LSAInterAreaRouter(LSAv3Header):
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.opts = self.data[0:3]
+        self.rsv = self.data[3]
+        self.metric = struct.unpack('>I', self.data[4:7] + b'\x00')[0] >> 8
+        self.dest_router = struct.unpack('>I', self.data[7:11])[0]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = self.opts + bytes([self.rsv])
+        body += struct.pack('>I', self.metric << 8)[:3] + struct.pack('>I', self.dest_router)
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 11
+
+
+class LSAASExternalV3(LSAv3Header):
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.flags = self.data[0]
+        self.metric = struct.unpack('>I', self.data[1:4] + b'\x00')[0] >> 8
+        self.prefix_length = self.data[4]
+        prefix_bytes = (self.prefix_length + 7) // 8
+        pos = 5 + prefix_bytes
+        self.prefix = self.data[5:pos]
+        if len(self.data) >= pos + 8:
+            self.forwarding = struct.unpack('>I', self.data[pos:pos + 4])[0]
+            self.tag = struct.unpack('>I', self.data[pos + 4:pos + 8])[0]
+        else:
+            self.forwarding = 0
+            self.tag = 0
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = bytes([self.flags]) + struct.pack('>I', self.metric << 8)[:3]
+        body += bytes([self.prefix_length]) + self.prefix
+        body += struct.pack('>II', self.forwarding, self.tag)
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 5 + len(self.prefix) + 8
+
+
+class LSANSSAV3(LSAASExternalV3):
+    pass
+
+
+class LSALink(LSAv3Header):
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.router_priority = self.data[0]
+        self.opts = self.data[1:4]
+        self.prefix_length = self.data[4]
+        prefix_bytes = (self.prefix_length + 7) // 8
+        self.prefix = self.data[5:5 + prefix_bytes]
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = bytes([self.router_priority]) + self.opts
+        body += bytes([self.prefix_length]) + self.prefix
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 5 + len(self.prefix)
+
+
+class LSAIntraAreaPrefix(LSAv3Header):
+    def __init__(self, *args, **kwargs):
+        self.prefixes = []
+        super(LSAIntraAreaPrefix, self).__init__(*args, **kwargs)
+
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.lsa_count = struct.unpack('>H', self.data[0:2])[0]
+        self.ref_type = struct.unpack('>H', self.data[2:4])[0]
+        self.ref_id = struct.unpack('>I', self.data[4:8])[0]
+        self.ref_adv_router = struct.unpack('>I', self.data[8:12])[0]
+        self.prefixes = []
+        off = 12
+        for _ in range(self.lsa_count):
+            if off >= len(self.data):
+                break
+            plen = self.data[off]
+            pbytes = (plen + 7) // 8
+            self.prefixes.append({
+                'prefix_length': plen,
+                'prefix': self.data[off + 1:off + 1 + pbytes],
+            })
+            off += 1 + pbytes
+        self.data = b''
+
+    def __bytes__(self):
+        hdr = self.pack_hdr()
+        body = struct.pack('>HHII', len(self.prefixes), self.ref_type,
+                           self.ref_id, self.ref_adv_router)
+        for p in self.prefixes:
+            body += bytes([p['prefix_length']]) + p['prefix']
+        return hdr + body
+
+    def __len__(self):
+        return self.__hdr_len__ + 12 + sum(1 + len(p['prefix']) for p in self.prefixes)
+
+
+# Register v3 message types
+OSPFv3._msg_sw.update({
+    OSPF_MSG_HELLO: OSPFv3Hello,
+    OSPF_MSG_DBD: OSPFv3DBD,
+    OSPF_MSG_LSR: OSPFv3LSR,
+    OSPF_MSG_LSU: OSPFv3LSU,
+    OSPF_MSG_LSACK: OSPFv3LSAck,
+})
+
+# Register v3 LSA types
+OSPFv3LSU._lsa_sw.update({
+    LSAv3_ROUTER: LSARouterV3,
+    LSAv3_NETWORK: LSANetworkV3,
+    LSAv3_INTER_AREA_PREFIX: LSAInterAreaPrefix,
+    LSAv3_INTER_AREA_ROUTER: LSAInterAreaRouter,
+    LSAv3_AS_EXTERNAL: LSAASExternalV3,
+    LSAv3_NSSA: LSANSSAV3,
+    LSAv3_LINK: LSALink,
+    LSAv3_INTRA_AREA_PREFIX: LSAIntraAreaPrefix,
+})
+
+
+def _mod_init():
     pass
 
 
@@ -430,3 +794,39 @@ def test_ospf_v2_router_lsa():
     assert len(parsed.links) == 1
     assert parsed.links[0]['metric'] == 10
     assert parsed.links[0]['type'] == 2
+
+def test_ospf_v3_hello():
+    """OSPFv3 Hello with interface_id and neighbors."""
+    hello = OSPFv3Hello(interface_id=5, router_priority=1,
+                        designated_router=0x0a000001, neighbors=[0x0a000002])
+    ospf = OSPFv3(type=OSPF_MSG_HELLO, router=0x0a000001, area=0, instance_id=0, data=hello)
+    data = bytes(ospf)
+    assert data[0:1] == b'\x03'
+    parsed = OSPF(data)
+    assert isinstance(parsed, OSPFv3)
+    assert isinstance(parsed.data, OSPFv3Hello)
+    assert parsed.ospfv3hello.interface_id == 5
+
+def test_ospf_v3_router_lsa():
+    """OSPFv3 Router-LSA with v3 link format."""
+    lsa = LSARouterV3(ls_type=LSAv3_ROUTER, id=0x0a000001, adv_router=0x0a000001,
+                      flags=0, links=[{'type': 2, 'rsv': 0, 'metric': 10,
+                                       'interface_id': 5, 'neighbor_interface_id': 6,
+                                       'neighbor_router': 0x0a000002}])
+    data = bytes(lsa)
+    parsed = LSARouterV3(data)
+    assert len(parsed.links) == 1
+    assert parsed.links[0]['interface_id'] == 5
+
+def test_ospf_v2_roundtrip():
+    """Full roundtrip: construct v2 Hello -> bytes -> parse -> verify."""
+    hello = OSPFv2Hello(mask=0xffffff00, hello_interval=10, router_priority=1,
+                        neighbors=[0x0a000002])
+    ospf = OSPFv2(v=OSPF_VERSION_2, type=OSPF_MSG_HELLO, router=0x0a000001,
+                  area=0, atype=AUTH_NONE, data=hello)
+    data = bytes(ospf)
+    parsed = OSPF(data)
+    assert isinstance(parsed, OSPFv2)
+    assert parsed.v == 2
+    assert parsed.router == 0x0a000001
+    assert isinstance(parsed.data, OSPFv2Hello)
