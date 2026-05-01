@@ -42,6 +42,7 @@ from . import ip6
 from . import isis
 from . import ipx
 from . import llc
+from . import l2tp
 from . import loopback
 from . import mrt
 from . import nbss
