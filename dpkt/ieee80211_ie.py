@@ -70,6 +70,10 @@ IE_HT_CAPA = 45
 IE_HT_INFO = 61
 IE_VHT_CAPA = 191
 IE_VHT_OP = 192
+IE_ERP = 42
+IE_RSN = 48
+IE_EXT_CAP = 127
+IE_COUNTRY = 7
 
 
 class IEEE80211IEHTCapability(IEEE80211IE):
@@ -118,12 +122,78 @@ class IEEE80211IEVHTOperation(IEEE80211IE):
             self.basic_mcs = struct.unpack('<H', self.info[4:6])[0]
 
 
+class IEEE80211IEERP(IEEE80211IE):
+    """ERP IE (42) — 1 byte flags."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if self.info:
+            self.flags = self.info[0]
+
+
+class IEEE80211IERSN(IEEE80211IE):
+    """RSN IE (48) — WPA2/WPA3."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 8:
+            self.version = struct.unpack('<H', self.info[0:2])[0]
+            self.group_suite = self.info[2:6]
+            self.pairwise_count = struct.unpack('<H', self.info[6:8])[0]
+            off = 8
+            self.pairwise = []
+            for _ in range(self.pairwise_count):
+                if off + 4 <= len(self.info):
+                    self.pairwise.append(self.info[off:off+4])
+                    off += 4
+            self.akm_count = 0
+            self.akm = []
+            if off + 2 <= len(self.info):
+                self.akm_count = struct.unpack('<H', self.info[off:off+2])[0]
+                off += 2
+            for _ in range(self.akm_count):
+                if off + 4 <= len(self.info):
+                    self.akm.append(self.info[off:off+4])
+                    off += 4
+            self.caps = 0
+            if off + 2 <= len(self.info):
+                self.caps = struct.unpack('<H', self.info[off:off+2])[0]
+
+
+class IEEE80211IEExtCap(IEEE80211IE):
+    """Extended Capabilities IE (127)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        self.flags = self.info
+
+
+class IEEE80211IECountry(IEEE80211IE):
+    """Country IE (7)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        self.country_code = self.info[:3] if len(self.info) >= 3 else b''
+        self.triplets = []
+        off = 3
+        while off + 3 <= len(self.info):
+            pwr = self.info[off+2]
+            if isinstance(pwr, int) and pwr > 127:
+                pwr = pwr - 256  # signed byte
+            self.triplets.append({
+                'channel': self.info[off],
+                'channels': self.info[off+1],
+                'power': pwr,
+            })
+            off += 3
+
+
 # Register HT/VHT IEs
 for ie_id, cls in [
     (IE_HT_CAPA, IEEE80211IEHTCapability),
     (IE_HT_INFO, IEEE80211IEHTInfo),
     (IE_VHT_CAPA, IEEE80211IEVHTCapability),
     (IE_VHT_OP, IEEE80211IEVHTOperation),
+    (IE_ERP, IEEE80211IEERP),
+    (IE_RSN, IEEE80211IERSN),
+    (IE_EXT_CAP, IEEE80211IEExtCap),
+    (IE_COUNTRY, IEEE80211IECountry),
 ]:
     register_ie(ie_id, cls)
 
@@ -167,3 +237,27 @@ def test_vht_capa_ie():
     ie = IEEE80211IEVHTCapability(buf)
     assert ie.id == IE_VHT_CAPA
     assert ie.rx_mcs == 0xaaaa
+
+
+def test_rsn_ie():
+    """RSN IE with group suite + pairwise + AKM."""
+    # version(2) + group(4) + pairwise_count(2) + pairwise(4) + akm_count(2) + akm(4) + caps(2) = 20
+    info = struct.pack('<H', 1) + b'\x00\x0f\xac\x04' + struct.pack('<H', 1) + b'\x00\x0f\xac\x04' + struct.pack('<H', 1) + b'\x00\x0f\xac\x02' + struct.pack('<H', 0)
+    buf = bytes([IE_RSN, len(info)]) + info
+    ie = IEEE80211IERSN(buf)
+    assert ie.id == IE_RSN
+    assert ie.version == 1
+    assert len(ie.pairwise) == 1
+    assert len(ie.akm) == 1
+    assert ie.caps == 0
+
+
+def test_country_ie():
+    """Country IE with triplets."""
+    # country(3) + triplet0(3) + triplet1(3) = 9
+    info = b'US ' + bytes([1, 11, 30]) + bytes([36, 4, 20])
+    buf = bytes([IE_COUNTRY, len(info)]) + info
+    ie = IEEE80211IECountry(buf)
+    assert ie.country_code == b'US '
+    assert len(ie.triplets) == 2
+    assert ie.triplets[0]['channel'] == 1
