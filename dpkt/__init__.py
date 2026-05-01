@@ -77,6 +77,7 @@ from . import sll
 from . import sll2
 from . import smb
 from . import smb2
+from . import smtp
 from . import ssl
 from . import stp
 from . import stream
