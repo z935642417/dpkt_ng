@@ -33,6 +33,7 @@ from . import h225
 from . import hsrp
 from . import http
 from . import http2
+from . import http3
 from . import icmp
 from . import icmp6
 from . import ieee80211
