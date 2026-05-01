@@ -35,6 +35,7 @@ from . import http2
 from . import icmp
 from . import icmp6
 from . import ieee80211
+from . import ieee80211_ie
 from . import igmp
 from . import ip
 from . import ip6
