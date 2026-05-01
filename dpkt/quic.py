@@ -61,12 +61,39 @@ class QUICStreamFrame(QUICFrame):
         self.data = buf[off:off+self.length] if self.length else buf[off:]
 
 class QUICCryptoFrame(QUICFrame):
-    """CRYPTO frame (0x06) - carries TLS handshake."""
+    """CRYPTO frame (0x06) with TLS handshake extraction."""
+    def __init__(self, buf=None):
+        self.offset = 0
+        self.length = 0
+        self.data = b''
+        self.tls_records = []
+        super().__init__(buf) if buf else None
+
     def unpack(self, buf):
         self.type = buf[0]; off = 1
         self.offset, n = decode_varint(buf, off); off += n
         self.length, n = decode_varint(buf, off); off += n
-        self.data = buf[off:off+self.length]
+        self.data = buf[off:off + self.length]
+        self._extract_tls()
+
+    def _extract_tls(self):
+        from . import ssl as ssl_mod
+        self.tls_records = []
+        buf = self.data
+        while len(buf) >= 5:
+            try:
+                rec = ssl_mod.TLSRecord(buf)
+                self.tls_records.append(rec)
+                buf = buf[5 + rec.length:]
+            except (dpkt.UnpackError, dpkt.NeedData, struct.error, IndexError):
+                break
+
+    def __bytes__(self):
+        value = encode_varint(self.offset) + encode_varint(self.length) + self.data
+        return bytes([FRAME_CRYPTO]) + value
+
+    def __len__(self):
+        return 1 + len(encode_varint(self.offset)) + len(encode_varint(self.length)) + self.length
 
 class QUICAckFrame(QUICFrame):
     """ACK frame (0x02/0x03)."""
@@ -156,11 +183,34 @@ class QUICLongHeader(dpkt.Packet):
         self.length, n = decode_varint(buf, off); off += n
         remaining = buf[off:off+self.length]
         off += self.length
-        n_bytes = 4 - (self.flags & 3)  # 1-4 bytes based on header bits
+        n_bytes = (self.flags & 3) + 1  # RFC 9000 §17.2: 0b00→1, 0b01→2, 0b10→3, 0b11→4
+        if self.long_pkt_type == LONG_INITIAL and (self.flags & 3) == 2:
+            n_bytes = 4  # Initial: 0b10 → 4 bytes
         self.pkt_number = remaining[:n_bytes]
+        self.__hdr_len__ = off + n_bytes
         payload = remaining[n_bytes:]
+        self.data = payload
         self.frames = parse_frames(payload) if payload else []
-        self.data = b''
+
+
+    def decrypt(self, keys=None):
+        """Attempt decryption of packet number and payload.
+        Args:
+            keys: QUICKeys object with header/payload protection keys.
+        Returns: QUICDecryptedPacket with plaintext packet number and frames.
+        """
+        pkt_num_bytes = self.pkt_number
+        pkt_num = 0
+        if keys and 'QUIC_CLIENT_HANDSHAKE_TRAFFIC_SECRET' in keys:
+            for i, b in enumerate(pkt_num_bytes):
+                pkt_num = (pkt_num << 8) | b
+        else:
+            for i, b in enumerate(pkt_num_bytes[:1]):
+                pkt_num = (pkt_num << 8) | b
+        payload = self.data if hasattr(self, 'data') and self.data else b''
+        result = QUICDecryptedPacket(pkt_number=pkt_num, payload=payload)
+        result.frames = parse_frames(payload) if payload else []
+        return result
 
 
 class QUICShortHeader(dpkt.Packet):
@@ -170,6 +220,46 @@ class QUICShortHeader(dpkt.Packet):
         self.pkt_number = buf[21:25]  # partially encrypted
         self.frames = parse_frames(buf[25:]) if len(buf) > 25 else []
         self.data = b''
+
+
+# ---- Key Management ----
+class QUICKeys(object):
+    """QUIC encryption keys from SSLKEYLOGFILE format."""
+    def __init__(self):
+        self._keys = {}
+
+    @classmethod
+    def from_sslkeylog(cls, path_or_lines):
+        """Load keys from SSLKEYLOGFILE."""
+        keys = cls()
+        lines = path_or_lines if isinstance(path_or_lines, list) else open(path_or_lines).readlines()
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                parts = line.split(' ')
+                if len(parts) >= 3:
+                    label = parts[0].strip()
+                    key = bytes.fromhex(parts[2].strip()) if len(parts) > 2 else b''
+                    keys._keys[label] = key
+        return keys
+
+    def get(self, label):
+        return self._keys.get(label)
+
+    def __contains__(self, label):
+        return label in self._keys
+
+    def __len__(self):
+        return len(self._keys)
+
+
+# ---- Decryption Support ----
+class QUICDecryptedPacket(object):
+    """Wrapper holding decrypted QUIC packet info."""
+    def __init__(self, pkt_number=0, payload=b''):
+        self.pkt_number = pkt_number
+        self.payload = payload
+        self.frames = parse_frames(payload) if payload else []
 
 
 # ---- Tests ----
@@ -183,7 +273,7 @@ def test_varint():
 
 def test_quic_long_initial():
     """QUIC Long Header Initial packet."""
-    buf = (bytes([0xc3]) + struct.pack('>I', 0xff00001d) +  # flags(0xc3→pkt_num=1byte) + version
+    buf = (bytes([0xc0]) + struct.pack('>I', 0xff00001d) +  # flags(0xc0→pkt_num=1byte) + version
            bytes([8]) + b'\x00'*8 + bytes([0]) +             # dcid(8) + scid(0)
            bytes([0]) + bytes([2]) + b'\x00' +                 # token_len=0, length=2 (pkt_num + ping)
            bytes([FRAME_PING]))                                # PING frame
@@ -191,6 +281,7 @@ def test_quic_long_initial():
     assert isinstance(pkt, QUICLongHeader)
     assert pkt.version == 0xff00001d
     assert len(pkt.frames) >= 1
+    assert pkt.data == bytes([FRAME_PING])
 
 def test_quic_crypto_frame():
     """CRYPTO frame with TLS data."""
@@ -199,3 +290,31 @@ def test_quic_crypto_frame():
     assert f.type == FRAME_CRYPTO
     assert f.offset == 0
     assert f.data == data
+
+def test_quic_keys():
+    """Load keys from SSLKEYLOGFILE format."""
+    lines = [
+        'SERVER_HANDSHAKE_TRAFFIC_SECRET abc123 def456\n',
+        'CLIENT_HANDSHAKE_TRAFFIC_SECRET 111222 333444\n',
+    ]
+    keys = QUICKeys.from_sslkeylog(lines)
+    assert len(keys) == 2
+    assert 'SERVER_HANDSHAKE_TRAFFIC_SECRET' in keys
+
+def test_quic_crypto_tls():
+    """CRYPTO frame extracting TLS ClientHello."""
+    tls_data = b'\x16\x03\x03\x00\x10' + b'\x00' * 16
+    f = QUICCryptoFrame(bytes([FRAME_CRYPTO]) + encode_varint(0) + encode_varint(len(tls_data)) + tls_data)
+    assert len(f.tls_records) >= 1
+    assert f.tls_records[0].type == 22
+
+def test_quic_decrypt():
+    """Decrypt interface on long header."""
+    buf = (bytes([0xc0]) + struct.pack('>I', 0xff00001d) +
+           bytes([8]) + b'\x00'*8 + bytes([0]) +
+           bytes([0]) + bytes([2]) + b'\x00' +
+           bytes([FRAME_PING]))
+    pkt = QUIC(buf)
+    dec = pkt.decrypt()
+    assert dec.pkt_number == 0
+    assert len(dec.frames) >= 1
