@@ -75,6 +75,89 @@ IE_RSN = 48
 IE_EXT_CAP = 127
 IE_COUNTRY = 7
 
+# HE Extension Element IDs (IE id=255, ext_id=...)
+HE_EXT_CAP = 35
+HE_EXT_OP = 36
+HE_EXT_SPATIAL_REUSE = 37
+HE_EXT_BSS_COLOR = 38
+HE_EXT_TWT = 39
+HE_EXT_6GHZ_BAND = 32
+HE_EXT_MCS_NSS = 33
+
+
+class IEEE80211IEHECapability(IEEE80211IE):
+    """HE Capabilities IE (255/35)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 6:
+            self.mac_info = self.info[1:6]
+        if len(self.info) >= 17:
+            self.phy_info = self.info[6:17]
+
+
+class IEEE80211IEHEOperation(IEEE80211IE):
+    """HE Operation IE (255/36)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 7:
+            self.params = self.info[1:4]
+            self.bss_color = self.info[4]
+            self.basic_mcs = struct.unpack('<H', self.info[5:7])[0]
+
+
+class IEEE80211IEHESpatialReuse(IEEE80211IE):
+    """HE Spatial Reuse Parameter Set (255/37)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        self.srg_info = self.info[1:]
+
+
+class IEEE80211IEHEBSSColorChange(IEEE80211IE):
+    """HE BSS Color Change IE (255/38)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 3:
+            self.ext_id = self.info[0]
+            self.new_color = self.info[1]
+            self.countdown = self.info[2]
+
+
+class IEEE80211IEHETWT(IEEE80211IE):
+    """HE TWT IE (255/39)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 3:
+            self.ext_id = self.info[0]
+            self.request = self.info[1]
+            self.broadcast = self.info[2]
+
+
+class IEEE80211IEHE6GHzBand(IEEE80211IE):
+    """HE 6 GHz Band Capability (255/32)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 5:
+            self.min_mcs = self.info[1]
+            self.max_ampdu = struct.unpack('<I', self.info[2:6])[0] >> 2
+        self.tx_power = self.info[6:] if len(self.info) > 6 else b''
+
+
+class IEEE80211IEHEMCSNSS(IEEE80211IE):
+    """HE MCS NSS Map (255/33)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        self.mcs_map = self.info[1:]
+
 
 class IEEE80211IEHTCapability(IEEE80211IE):
     """HT Capabilities IE (45)."""
@@ -219,6 +302,18 @@ for ie_id, cls in [
 
 register_ie(221, IEEE80211IEWMM)
 
+# Register all HE IEs via extension tag (255)
+for ext_id, cls in [
+    (HE_EXT_CAP, IEEE80211IEHECapability),
+    (HE_EXT_OP, IEEE80211IEHEOperation),
+    (HE_EXT_SPATIAL_REUSE, IEEE80211IEHESpatialReuse),
+    (HE_EXT_BSS_COLOR, IEEE80211IEHEBSSColorChange),
+    (HE_EXT_TWT, IEEE80211IEHETWT),
+    (HE_EXT_6GHZ_BAND, IEEE80211IEHE6GHzBand),
+    (HE_EXT_MCS_NSS, IEEE80211IEHEMCSNSS),
+]:
+    register_ie(255, cls, ext_id=ext_id)
+
 
 def test_ie_parse():
     """Basic IE parsing."""
@@ -293,3 +388,37 @@ def test_wmm_ie():
     assert ie.qos_info == 0x0f
     assert len(ie.params) == 2
     assert ie.params[0]['aci'] == 1
+
+
+def test_he_cap_ie():
+    """HE Capabilities via extension tag."""
+    info = bytes([HE_EXT_CAP]) + b'\x00' * 5 + b'\x00' * 11
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEHECapability(buf)
+    assert ie.id == 255
+    assert ie.ext_id == HE_EXT_CAP
+
+
+def test_he_op_ie():
+    """HE Operation IE with BSS Color."""
+    info = bytes([HE_EXT_OP]) + b'\x00' * 3 + bytes([42]) + struct.pack('<H', 0xffff)
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEHEOperation(buf)
+    assert ie.bss_color == 42
+
+
+def test_bss_color_change_ie():
+    info = bytes([HE_EXT_BSS_COLOR]) + bytes([10]) + bytes([5])
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEHEBSSColorChange(buf)
+    assert ie.new_color == 10
+    assert ie.countdown == 5
+
+
+def test_extension_tag_unpack():
+    """Verify unpack_ies() dispatches extension tags correctly."""
+    info = bytes([HE_EXT_TWT]) + bytes([1, 1])
+    buf = bytes([255, len(info)]) + info + bytes([0, 4, 0, 0, 0, 0])  # ext TWT + SSID
+    ies = unpack_ies(buf)
+    assert len(ies) == 2
+    assert isinstance(ies[0], IEEE80211IEHETWT)
