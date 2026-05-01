@@ -39,6 +39,7 @@ from . import icmp6
 from . import ieee80211
 from . import ieee80211_ie
 from . import igmp
+from . import imap
 from . import ip
 from . import ip6
 from . import isis
