@@ -85,6 +85,7 @@ from . import stream
 from . import stun
 from . import tcp
 from . import telnet
+from . import topology
 from . import tftp
 from . import tns
 from . import tpkt
