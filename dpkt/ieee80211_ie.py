@@ -184,6 +184,26 @@ class IEEE80211IECountry(IEEE80211IE):
             off += 3
 
 
+class IEEE80211IEWMM(IEEE80211IE):
+    """WMM/WME vendor IE (221, OUI 00:50:F2:02:01)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 7 and self.info[0:4] == b'\x00\x50\xf2\x02':
+            self.oui = self.info[0:3]
+            self.oui_type = self.info[3]
+            self.subtype = self.info[4]
+            self.version = self.info[5]
+            self.qos_info = self.info[6]
+            self.params = []
+            off = 7
+            while off + 4 <= len(self.info):
+                aci = (self.info[off] >> 5) & 3
+                acm = (self.info[off] >> 4) & 1
+                param = struct.unpack('<H', self.info[off+2:off+4])[0]
+                self.params.append({'aci': aci, 'acm': acm, 'txop': param})
+                off += 4
+
+
 # Register HT/VHT IEs
 for ie_id, cls in [
     (IE_HT_CAPA, IEEE80211IEHTCapability),
@@ -196,6 +216,8 @@ for ie_id, cls in [
     (IE_COUNTRY, IEEE80211IECountry),
 ]:
     register_ie(ie_id, cls)
+
+register_ie(221, IEEE80211IEWMM)
 
 
 def test_ie_parse():
@@ -261,3 +283,13 @@ def test_country_ie():
     assert ie.country_code == b'US '
     assert len(ie.triplets) == 2
     assert ie.triplets[0]['channel'] == 1
+
+
+def test_wmm_ie():
+    """WMM IE with AC parameters."""
+    info = b'\x00\x50\xf2\x02\x01\x01\x0f' + bytes([0x22, 0, 0, 0]) + bytes([0x44, 0, 0, 0])
+    buf = bytes([221, len(info)]) + info
+    ie = IEEE80211IEWMM(buf)
+    assert ie.qos_info == 0x0f
+    assert len(ie.params) == 2
+    assert ie.params[0]['aci'] == 1

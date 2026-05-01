@@ -225,6 +225,7 @@ class IEEE80211(dpkt.Packet):
             M_DISASSOC: ('diassoc', self.Disassoc),
             M_REASSOC_REQ: ('reassoc_req', self.Reassoc_Req),
             M_REASSOC_RESP: ('reassoc_resp', self.Assoc_Resp),
+            M_PROBE_REQ: ('probe_req', self.ProbeReq),
             M_AUTH: ('auth', self.Auth),
             M_PROBE_RESP: ('probe_resp', self.Beacon),
             M_DEAUTH: ('deauth', self.Deauth),
@@ -272,9 +273,6 @@ class IEEE80211(dpkt.Packet):
         if self.type == MGMT_TYPE:
             self.mgmt = self.MGMT_Frame(self.data)
             self.data = self.mgmt.data
-            if self.subtype == M_PROBE_REQ:
-                self.unpack_ies(self.data)
-                return
             if self.subtype == M_ATIM:
                 return
 
@@ -425,6 +423,13 @@ class IEEE80211(dpkt.Packet):
             ('capability', 'H', 0),
             ('interval', 'H', 0)
         )
+
+    class ProbeReq(dpkt.Packet):
+        """Probe Request body — just IEs."""
+        def unpack(self, buf):
+            from .ieee80211_ie import unpack_ies
+            self.tlvs = unpack_ies(buf)
+            self.data = b''
 
     class Assoc_Resp(dpkt.Packet):
         __byte_order__ = '<'
