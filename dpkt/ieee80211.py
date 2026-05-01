@@ -7,7 +7,7 @@ from __future__ import absolute_import
 import struct
 
 from . import dpkt
-from .compat import ntole, ntole64
+
 
 # Frame Types
 MGMT_TYPE = 0
@@ -128,107 +128,33 @@ class IEEE80211(dpkt.Packet):
     for implementing wireless local area network (WLAN) computer communication.
 
     Attributes:
-        __hdr__: Header fields of IEEE802.11.
+        __hdr__: Header fields of IEEE80211.
             framectl: (int): Frame control (2 bytes)
             duration: (int): Duration ID (2 bytes)
     """
 
+    __byte_order__ = '<'
+
     __hdr__ = (
-        ('framectl', 'H', 0),
+        ('_framectl', 'H', 0),
         ('duration', 'H', 0)
     )
 
-    # The standard really defines the entire MAC protocol as little-endian on the wire,
-    # however there is broken logic in the rest of the module preventing this from working right now
-    #  __byte_order__ = '<'
-
-    @property
-    def version(self):
-        return (self.framectl & _VERSION_MASK) >> _VERSION_SHIFT
-
-    @version.setter
-    def version(self, val):
-        self.framectl = (val << _VERSION_SHIFT) | (self.framectl & ~_VERSION_MASK)
-
-    @property
-    def type(self):
-        return (self.framectl & _TYPE_MASK) >> _TYPE_SHIFT
-
-    @type.setter
-    def type(self, val):
-        self.framectl = (val << _TYPE_SHIFT) | (self.framectl & ~_TYPE_MASK)
-
-    @property
-    def subtype(self):
-        return (self.framectl & _SUBTYPE_MASK) >> _SUBTYPE_SHIFT
-
-    @subtype.setter
-    def subtype(self, val):
-        self.framectl = (val << _SUBTYPE_SHIFT) | (self.framectl & ~_SUBTYPE_MASK)
-
-    @property
-    def to_ds(self):
-        return (self.framectl & _TO_DS_MASK) >> _TO_DS_SHIFT
-
-    @to_ds.setter
-    def to_ds(self, val):
-        self.framectl = (val << _TO_DS_SHIFT) | (self.framectl & ~_TO_DS_MASK)
-
-    @property
-    def from_ds(self):
-        return (self.framectl & _FROM_DS_MASK) >> _FROM_DS_SHIFT
-
-    @from_ds.setter
-    def from_ds(self, val):
-        self.framectl = (val << _FROM_DS_SHIFT) | (self.framectl & ~_FROM_DS_MASK)
-
-    @property
-    def more_frag(self):
-        return (self.framectl & _MORE_FRAG_MASK) >> _MORE_FRAG_SHIFT
-
-    @more_frag.setter
-    def more_frag(self, val):
-        self.framectl = (val << _MORE_FRAG_SHIFT) | (self.framectl & ~_MORE_FRAG_MASK)
-
-    @property
-    def retry(self):
-        return (self.framectl & _RETRY_MASK) >> _RETRY_SHIFT
-
-    @retry.setter
-    def retry(self, val):
-        self.framectl = (val << _RETRY_SHIFT) | (self.framectl & ~_RETRY_MASK)
-
-    @property
-    def pwr_mgt(self):
-        return (self.framectl & _PWR_MGT_MASK) >> _PWR_MGT_SHIFT
-
-    @pwr_mgt.setter
-    def pwr_mgt(self, val):
-        self.framectl = (val << _PWR_MGT_SHIFT) | (self.framectl & ~_PWR_MGT_MASK)
-
-    @property
-    def more_data(self):
-        return (self.framectl & _MORE_DATA_MASK) >> _MORE_DATA_SHIFT
-
-    @more_data.setter
-    def more_data(self, val):
-        self.framectl = (val << _MORE_DATA_SHIFT) | (self.framectl & ~_MORE_DATA_MASK)
-
-    @property
-    def wep(self):
-        return (self.framectl & _WEP_MASK) >> _WEP_SHIFT
-
-    @wep.setter
-    def wep(self, val):
-        self.framectl = (val << _WEP_SHIFT) | (self.framectl & ~_WEP_MASK)
-
-    @property
-    def order(self):
-        return (self.framectl & _ORDER_MASK) >> _ORDER_SHIFT
-
-    @order.setter
-    def order(self, val):
-        self.framectl = (val << _ORDER_SHIFT) | (self.framectl & ~_ORDER_MASK)
+    __bit_fields__ = {
+        '_framectl': (
+            ('order', 1),
+            ('wep', 1),
+            ('more_data', 1),
+            ('pwr_mgt', 1),
+            ('retry', 1),
+            ('more_frag', 1),
+            ('from_ds', 1),
+            ('to_ds', 1),
+            ('subtype', 4),
+            ('type', 2),
+            ('version', 2),
+        ),
+    }
 
     def unpack_ies(self, buf):
         self.ies = []
@@ -373,7 +299,7 @@ class IEEE80211(dpkt.Packet):
         if self.type == MGMT_TYPE:
             self.unpack_ies(field.data)
             if self.subtype in FRAMES_WITH_CAPABILITY:
-                self.capability = self.Capability(ntole(field.capability))
+                self.capability = self.Capability(field.capability)
 
         if self.type == DATA_TYPE and self.subtype == D_QOS_DATA:
             self.qos_data = self.QoS_Data(field.data)
@@ -390,6 +316,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class BlockAck(dpkt.Packet):
+        __byte_order__ = '<'
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
@@ -432,7 +359,6 @@ class IEEE80211(dpkt.Packet):
         def unpack(self, buf):
             dpkt.Packet.unpack(self, buf)
             self.data = buf[self.__hdr_len__:]
-            self.ctl = ntole(self.ctl)
 
             if self.compressed:
                 self.bmp = struct.unpack('8s', self.data[0:_COMPRESSED_BMP_LENGTH])[0]
@@ -443,11 +369,11 @@ class IEEE80211(dpkt.Packet):
     class _FragmentNumSeqNumMixin(object):
         @property
         def fragment_number(self):
-            return ntole(self.frag_seq) & _FRAGMENT_NUMBER_MASK
+            return self.frag_seq & _FRAGMENT_NUMBER_MASK
 
         @property
         def sequence_number(self):
-            return (ntole(self.frag_seq) & _SEQUENCE_NUMBER_MASK) >> _SEQUENCE_NUMBER_SHIFT
+            return (self.frag_seq & _SEQUENCE_NUMBER_MASK) >> _SEQUENCE_NUMBER_SHIFT
 
     class RTS(dpkt.Packet):
         __hdr__ = (
@@ -472,6 +398,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class MGMT_Frame(dpkt.Packet, _FragmentNumSeqNumMixin):
+        __byte_order__ = '<'
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
@@ -480,16 +407,12 @@ class IEEE80211(dpkt.Packet):
         )
 
     class Beacon(dpkt.Packet):
+        __byte_order__ = '<'
         __hdr__ = (
             ('timestamp', 'Q', 0),
             ('interval', 'H', 0),
             ('capability', 'H', 0)
         )
-
-        def unpack(self, buf):
-            dpkt.Packet.unpack(self, buf)
-            self.timestamp = ntole64(self.timestamp)
-            self.interval = ntole(self.interval)
 
     class Disassoc(dpkt.Packet):
         __hdr__ = (
@@ -497,12 +420,14 @@ class IEEE80211(dpkt.Packet):
         )
 
     class Assoc_Req(dpkt.Packet):
+        __byte_order__ = '<'
         __hdr__ = (
             ('capability', 'H', 0),
             ('interval', 'H', 0)
         )
 
     class Assoc_Resp(dpkt.Packet):
+        __byte_order__ = '<'
         __hdr__ = (
             ('capability', 'H', 0),
             ('status', 'H', 0),
@@ -510,6 +435,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class Reassoc_Req(dpkt.Packet):
+        __byte_order__ = '<'
         __hdr__ = (
             ('capability', 'H', 0),
             ('interval', 'H', 0),
@@ -580,6 +506,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class Data(dpkt.Packet, _FragmentNumSeqNumMixin):
+        __byte_order__ = '<'
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
@@ -588,6 +515,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class DataFromDS(dpkt.Packet, _FragmentNumSeqNumMixin):
+        __byte_order__ = '<'
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('bssid', '6s', '\x00' * 6),
@@ -596,6 +524,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class DataToDS(dpkt.Packet, _FragmentNumSeqNumMixin):
+        __byte_order__ = '<'
         __hdr__ = (
             ('bssid', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
@@ -604,6 +533,7 @@ class IEEE80211(dpkt.Packet):
         )
 
     class DataInterDS(dpkt.Packet, _FragmentNumSeqNumMixin):
+        __byte_order__ = '<'
         __hdr__ = (
             ('dst', '6s', '\x00' * 6),
             ('src', '6s', '\x00' * 6),
@@ -720,7 +650,7 @@ def test_80211_beacon():
     assert ieee.order == 0
     assert ieee.mgmt.dst == b'\xff\xff\xff\xff\xff\xff'
     assert ieee.mgmt.src == b'\x00\x26\xcb\x18\x6a\x30'
-    assert ieee.beacon.capability == 0x3104
+    assert ieee.beacon.capability == 0x0431
     assert ieee.capability.privacy == 1
     assert ieee.ssid.data == b'CAEN'
     assert ieee.rate.data == b'\x82\x84\x8b\x0c\x12\x96\x18\x24'
@@ -742,7 +672,7 @@ def test_80211_data():
     assert ieee.subtype == D_DATA
     assert ieee.data_frame.dst == b'\x00\x02\xb3\xd6\x26\x3c'
     assert ieee.data_frame.src == b'\x00\x16\x44\xb0\xae\xc6'
-    assert ieee.data_frame.frag_seq == 0x807e
+    assert ieee.data_frame.frag_seq == 0x7e80
     assert ieee.data_frame.fragment_number == 0
     assert ieee.data_frame.sequence_number == 2024
     assert ieee.data == (b'\xaa\xaa\x03\x00\x00\x00\x08\x00\x45\x00\x00\x28\x07\x27\x40\x00\x80\x06'
@@ -772,7 +702,7 @@ def test_80211_data_qos():
     assert ieee.subtype == D_QOS_DATA
     assert ieee.data_frame.dst == b'\x00\x26\xcb\x17\x44\xf0'
     assert ieee.data_frame.src == b'\x00\x23\xdf\xc9\xc0\x93'
-    assert ieee.data_frame.frag_seq == 0x207b
+    assert ieee.data_frame.frag_seq == 0x7b20
     assert ieee.data_frame.fragment_number == 0
     assert ieee.data_frame.sequence_number == 1970
     assert ieee.data == (b'\xaa\xaa\x03\x00\x00\x00\x88\x8e\x01\x00\x00\x74\x02\x02\x00\x74\x19\x80'
@@ -1016,7 +946,7 @@ def test_beacon_unpack():
     beacon = IEEE80211.Beacon(beacon_payload)
     assert beacon.timestamp == 0x0000025245fa71b9
     assert beacon.interval == 100
-    assert beacon.capability == 0x1104
+    assert beacon.capability == 0x0411
 
 
 def test_fragment_and_sequence_values():
