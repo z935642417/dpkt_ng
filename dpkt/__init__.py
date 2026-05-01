@@ -84,6 +84,7 @@ from . import tns
 from . import tpkt
 from . import udp
 from . import vrrp
+from . import vxlan
 from . import yahoo
 
 # Note: list() is used to get a copy of the dict in order to avoid
