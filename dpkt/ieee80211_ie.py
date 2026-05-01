@@ -84,6 +84,12 @@ HE_EXT_TWT = 39
 HE_EXT_6GHZ_BAND = 32
 HE_EXT_MCS_NSS = 33
 
+# EHT Extension Element IDs (802.11be)
+EHT_EXT_CAP = 106
+EHT_EXT_OP = 107
+EHT_EXT_TID_LINK = 108
+EHT_EXT_ML_COMMON = 101    # Multi-Link Element - Common Info
+
 
 class IEEE80211IEHECapability(IEEE80211IE):
     """HE Capabilities IE (255/35)."""
@@ -157,6 +163,52 @@ class IEEE80211IEHEMCSNSS(IEEE80211IE):
         if len(self.info) >= 1:
             self.ext_id = self.info[0]
         self.mcs_map = self.info[1:]
+
+
+class IEEE80211IEEHTCapability(IEEE80211IE):
+    """EHT Capabilities IE (255/106)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 5:
+            self.mac_cap = self.info[1:5]
+        if len(self.info) >= 13:
+            self.phy_cap = self.info[5:13]
+        self.eht_mcs_nss = self.info[13:]
+
+
+class IEEE80211IEEHTOperation(IEEE80211IE):
+    """EHT Operation IE (255/107)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 4:
+            self.params = self.info[1]
+            self.basic_mcs = struct.unpack('<H', self.info[2:4])[0]
+
+
+class IEEE80211IEEHTTIDLink(IEEE80211IE):
+    """EHT TID-to-Link Mapping IE (255/108)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        self.mapping = self.info[1:]
+
+
+class IEEE80211IEMLElement(IEEE80211IE):
+    """Multi-Link Element IE (255/101)."""
+    def unpack(self, buf):
+        super().unpack(buf)
+        if len(self.info) >= 1:
+            self.ext_id = self.info[0]
+        if len(self.info) >= 3:
+            self.ml_control = struct.unpack('<H', self.info[1:3])[0]
+            self.type = (self.ml_control >> 0) & 0x7
+            self.presence = (self.ml_control >> 3)
+        self.common_info = self.info[3:] if len(self.info) > 3 else b''
 
 
 class IEEE80211IEHTCapability(IEEE80211IE):
@@ -314,6 +366,15 @@ for ext_id, cls in [
 ]:
     register_ie(255, cls, ext_id=ext_id)
 
+# Register all EHT IEs via extension tag (255)
+for ext_id, cls in [
+    (EHT_EXT_CAP, IEEE80211IEEHTCapability),
+    (EHT_EXT_OP, IEEE80211IEEHTOperation),
+    (EHT_EXT_TID_LINK, IEEE80211IEEHTTIDLink),
+    (EHT_EXT_ML_COMMON, IEEE80211IEMLElement),
+]:
+    register_ie(255, cls, ext_id=ext_id)
+
 
 def test_ie_parse():
     """Basic IE parsing."""
@@ -422,3 +483,27 @@ def test_extension_tag_unpack():
     ies = unpack_ies(buf)
     assert len(ies) == 2
     assert isinstance(ies[0], IEEE80211IEHETWT)
+
+
+def test_eht_cap_ie():
+    info = bytes([EHT_EXT_CAP]) + b'\x00' * 4 + b'\x00' * 8
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEEHTCapability(buf)
+    assert ie.id == 255
+    assert ie.ext_id == EHT_EXT_CAP
+
+
+def test_eht_op_ie():
+    info = bytes([EHT_EXT_OP]) + bytes([0x01]) + struct.pack('<H', 0xfff)
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEEHTOperation(buf)
+    assert ie.params == 1
+
+
+def test_ml_element():
+    """Multi-Link Element: ml_control field."""
+    info = bytes([EHT_EXT_ML_COMMON]) + struct.pack('<H', 0x0001)
+    buf = bytes([255, len(info)]) + info
+    ie = IEEE80211IEMLElement(buf)
+    assert ie.ext_id == EHT_EXT_ML_COMMON
+    assert ie.type == 1
