@@ -58,6 +58,7 @@ from . import pim
 from . import pmap
 from . import ppp
 from . import pppoe
+from . import qpack
 from . import qq
 from . import quic
 from . import radiotap
