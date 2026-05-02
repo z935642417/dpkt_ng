@@ -26,6 +26,7 @@ from . import eigrp
 from . import esp
 from . import ftp
 from . import ethernet
+from . import filecarver
 from . import gre
 from . import gtp
 from . import gzip
